@@ -1,4 +1,4 @@
-//go:build integration
+//go:build e2e
 
 package whisper
 
@@ -58,7 +58,6 @@ func TestDownloadModelFromHF(t *testing.T) {
 
 // TestFullFlow downloads a model, loads it, transcribes a real audio file, and checks the output.
 func TestFullFlow(t *testing.T) {
-	// Download a short English speech sample (LibriSpeech, ~5 sec).
 	// JFK "ask not what your country can do for you" — classic Whisper test sample.
 	const audioURL = "https://raw.githubusercontent.com/ggml-org/whisper.cpp/master/samples/jfk.wav"
 	audioPath := downloadTestAudio(t, audioURL)
@@ -92,7 +91,6 @@ func TestFullFlow(t *testing.T) {
 		t.Logf("  [%s → %s] %s", seg.Start, seg.End, seg.Text)
 	}
 
-	// Sanity check: we should get some non-empty English text.
 	if strings.TrimSpace(result.Text) == "" {
 		t.Fatal("transcription returned empty text")
 	}
@@ -133,7 +131,6 @@ func decodeWAV(t *testing.T, path string) []float32 {
 	}
 	defer f.Close()
 
-	// Parse WAV header.
 	var riffID [4]byte
 	var fileSize uint32
 	var waveID [4]byte
@@ -149,7 +146,6 @@ func decodeWAV(t *testing.T, path string) []float32 {
 	var bitsPerSample uint16
 	var numChannels uint16
 
-	// Find fmt and data chunks.
 	var dataSize uint32
 	for {
 		var chunkID [4]byte
@@ -165,10 +161,8 @@ func decodeWAV(t *testing.T, path string) []float32 {
 			binary.Read(f, binary.LittleEndian, &audioFormat)
 			binary.Read(f, binary.LittleEndian, &numChannels)
 			binary.Read(f, binary.LittleEndian, &sampleRate)
-			// Skip byteRate(4) + blockAlign(2).
 			f.Seek(6, io.SeekCurrent)
 			binary.Read(f, binary.LittleEndian, &bitsPerSample)
-			// Skip any extra fmt bytes.
 			if chunkSize > 16 {
 				f.Seek(int64(chunkSize-16), io.SeekCurrent)
 			}
@@ -190,7 +184,6 @@ readData:
 	raw := make([]int16, numSamples*int(numChannels))
 	binary.Read(f, binary.LittleEndian, &raw)
 
-	// Mix to mono.
 	mono := make([]float32, numSamples)
 	for i := 0; i < numSamples; i++ {
 		var sum float64
@@ -200,7 +193,6 @@ readData:
 		mono[i] = float32(sum / float64(numChannels) / 32768.0)
 	}
 
-	// Resample to 16kHz if needed.
 	if sampleRate == 16000 {
 		return mono
 	}
