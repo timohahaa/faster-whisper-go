@@ -13,6 +13,10 @@ struct ct2_model {
     std::unique_ptr<ctranslate2::models::Whisper> whisper;
 };
 
+struct ct2_encoder_output {
+    ctranslate2::StorageView view;
+};
+
 namespace {
 
 thread_local std::string g_last_error;
@@ -113,34 +117,64 @@ int32_t ct2_model_n_mels(ct2_model* m) {
     return static_cast<int32_t>(m->whisper->n_mels());
 }
 
+ct2_encoder_output* ct2_encode(
+    ct2_model* m,
+    const float* mel, size_t n_mels, size_t n_frames) {
+    g_last_error.clear();
+    if (m == nullptr || m->whisper == nullptr) {
+        g_last_error = "model is null";
+        return nullptr;
+    }
+    if (mel == nullptr || n_mels == 0 || n_frames == 0) {
+        g_last_error = "mel spectrogram is required";
+        return nullptr;
+    }
+
+    try {
+        ctranslate2::StorageView features = make_mel_features(mel, n_mels, n_frames);
+        auto future = m->whisper->encode(features, /*to_cpu=*/false);
+        ctranslate2::StorageView encoded = future.get();
+        auto out = new ct2_encoder_output{std::move(encoded)};
+        return out;
+    } catch (const std::exception& e) {
+        set_last_error(e);
+        return nullptr;
+    }
+}
+
+void ct2_encoder_output_free(ct2_encoder_output* e) {
+    delete e;
+}
+
 ct2_generate_result ct2_generate(
     ct2_model* m,
-    const float* mel, size_t n_mels, size_t n_frames,
+    ct2_encoder_output* encoder_output,
     const int32_t* prompt_tokens, size_t prompt_count,
-    int beam_size, int best_of, float patience, float length_penalty,
+    int beam_size, int best_of,
+    float patience, float length_penalty,
     float repetition_penalty, int no_repeat_ngram_size,
-    int max_length, bool suppress_blank, bool return_scores) {
+    int max_length,
+    bool suppress_blank, bool return_scores,
+    float sampling_temperature,
+    const int32_t* suppress_tokens, size_t suppress_tokens_count,
+    int max_initial_timestamp_index) {
     if (m == nullptr || m->whisper == nullptr) {
         return make_generate_error("model is null");
     }
-    if (mel == nullptr || n_mels == 0 || n_frames == 0) {
-        return make_generate_error("mel spectrogram is required");
+    if (encoder_output == nullptr) {
+        return make_generate_error("encoder output is required");
     }
     if (prompt_tokens == nullptr && prompt_count > 0) {
         return make_generate_error("prompt tokens are required");
     }
 
     try {
-        ctranslate2::StorageView features = make_mel_features(mel, n_mels, n_frames);
-
         std::vector<size_t> prompt(prompt_count);
         for (size_t i = 0; i < prompt_count; ++i) {
             prompt[i] = static_cast<size_t>(prompt_tokens[i]);
         }
 
         ctranslate2::models::WhisperOptions options;
-        options.beam_size = beam_size > 0 ? static_cast<size_t>(beam_size) : 1;
-        options.num_hypotheses = best_of > 0 ? static_cast<size_t>(best_of) : 1;
         options.patience = patience > 0 ? patience : 1.0f;
         options.length_penalty = length_penalty > 0 ? length_penalty : 1.0f;
         options.repetition_penalty = repetition_penalty > 0 ? repetition_penalty : 1.0f;
@@ -150,10 +184,30 @@ ct2_generate_result ct2_generate(
         options.suppress_blank = suppress_blank;
         options.return_scores = return_scores;
         options.return_no_speech_prob = true;
+        options.max_initial_timestamp_index =
+            max_initial_timestamp_index >= 0 ? static_cast<size_t>(max_initial_timestamp_index) : 50;
+
+        if (sampling_temperature > 0) {
+            options.beam_size = 1;
+            options.num_hypotheses = best_of > 0 ? static_cast<size_t>(best_of) : 1;
+            options.sampling_topk = 0;
+            options.sampling_temperature = sampling_temperature;
+        } else {
+            options.beam_size = beam_size > 0 ? static_cast<size_t>(beam_size) : 1;
+            options.num_hypotheses = 1;
+        }
+
+        if (suppress_tokens != nullptr && suppress_tokens_count > 0) {
+            std::vector<int> stoks(suppress_tokens_count);
+            for (size_t i = 0; i < suppress_tokens_count; ++i) {
+                stoks[i] = static_cast<int>(suppress_tokens[i]);
+            }
+            options.suppress_tokens = std::move(stoks);
+        }
 
         const std::vector<std::vector<size_t>> prompts = {prompt};
         std::vector<std::future<ctranslate2::models::WhisperGenerationResult>> futures =
-            m->whisper->generate(features, prompts, options);
+            m->whisper->generate(encoder_output->view, prompts, options);
 
         if (futures.empty()) {
             return make_generate_error("generate returned no results");
@@ -191,18 +245,17 @@ ct2_generate_result ct2_generate(
 
 ct2_detect_result ct2_detect_language(
     ct2_model* m,
-    const float* mel, size_t n_mels, size_t n_frames) {
+    ct2_encoder_output* encoder_output) {
     if (m == nullptr || m->whisper == nullptr) {
         return make_detect_error("model is null");
     }
-    if (mel == nullptr || n_mels == 0 || n_frames == 0) {
-        return make_detect_error("mel spectrogram is required");
+    if (encoder_output == nullptr) {
+        return make_detect_error("encoder output is required");
     }
 
     try {
-        ctranslate2::StorageView features = make_mel_features(mel, n_mels, n_frames);
         std::vector<std::future<std::vector<std::pair<std::string, float>>>> futures =
-            m->whisper->detect_language(features);
+            m->whisper->detect_language(encoder_output->view);
 
         if (futures.empty()) {
             return make_detect_error("detect_language returned no results");

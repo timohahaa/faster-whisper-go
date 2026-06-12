@@ -10,12 +10,14 @@ const (
 	// whisperNFrames is the number of STFT frames in one 30-second chunk:
 	// sampleRate * chunkLen / hopLength = 16000 * 30 / 160 = 3000.
 	whisperNFrames = 3000
+
+	framesPerSecond = whisperSampleRate / whisperHopLength // 100
+	timePerFrame    = float64(whisperHopLength) / float64(whisperSampleRate)
+	inputStride     = 2
 )
 
 // hzToMel converts frequency in Hz to the mel scale using the HTK formula
 // mel = 2595 * log10(1 + hz/700).
-// The mel scale models human nonlinear pitch perception: low frequencies
-// are resolved in fine detail while high frequencies are compressed.
 func hzToMel(hz float64) float64 {
 	return 2595.0 * math.Log10(1.0+hz/700.0)
 }
@@ -27,7 +29,6 @@ func melToHz(mel float64) float64 {
 
 // computeMelFilterbank builds a bank of nMels triangular band-pass filters
 // stored as a flat slice of length nMels*(nFFT/2+1), row-major (mel bin major).
-// Center frequencies are evenly spaced on the mel scale.
 func computeMelFilterbank(nMels, nFFT, sampleRate int) []float32 {
 	freqBins := nFFT/2 + 1
 	melMin := hzToMel(0)
@@ -65,9 +66,7 @@ func computeMelFilterbank(nMels, nFFT, sampleRate int) []float32 {
 			}
 		}
 
-		// Slaney normalization: scale each triangle by 2/(f_right - f_left) so its
-		// area is constant. This ensures narrow low-frequency bands and wide
-		// high-frequency bands contribute comparable energy values.
+		// Slaney normalization
 		enorm := float32(2.0 / (hzPoints[i+2] - hzPoints[i]))
 		for j := range freqBins {
 			filters[base+j] *= enorm
@@ -76,26 +75,22 @@ func computeMelFilterbank(nMels, nFFT, sampleRate int) []float32 {
 	return filters
 }
 
-// computeMelSpectrogram computes a log-mel spectrogram matching Whisper's preprocessing.
-// Returns a flat []float32 of length nMels*whisperNFrames, row-major (mel bin major).
-func computeMelSpectrogram(samples []float32, nMels int) []float32 {
+// computeMelSpectrogram computes a log-mel spectrogram for audio of any length.
+// Returns a flat []float32 of length nMels*totalFrames (row-major, mel-bin-major)
+// and the total number of STFT frames.
+func computeMelSpectrogram(samples []float32, nMels int) ([]float32, int) {
 	power, stftFrames := stft(samples, whisperNFFT, whisperHopLength)
 	freqBins := whisperFreqBins
 
 	filters := computeMelFilterbank(nMels, whisperNFFT, whisperSampleRate)
 
-	outFrames := whisperNFrames
-	nFrames := min(stftFrames, outFrames)
-
-	// Fused matmul + log-normalization into the output buffer directly.
-	// mel[i][t] = sum_j(filters[i][j] * power[t][j])
-	out := make([]float32, nMels*outFrames)
+	out := make([]float32, nMels*stftFrames)
 
 	maxVal := math.Inf(-1)
 	for i := range nMels {
 		filterBase := i * freqBins
-		outBase := i * outFrames
-		for t := range nFrames {
+		outBase := i * stftFrames
+		for t := range stftFrames {
 			var sum float64
 			powerBase := t * freqBins
 			for j := range freqBins {
@@ -109,14 +104,6 @@ func computeMelSpectrogram(samples []float32, nMels int) []float32 {
 		}
 	}
 
-	// Log-normalization matching faster-whisper's Python preprocessing:
-	//
-	// 1) log10(clamp(x, min=1e-10)) — already done above.
-	//
-	// 2) max(x, global_max - 8.0) — floor the dynamic range to ~80 dB below
-	//    the loudest bin.
-	//
-	// 3) (x + 4.0) / 4.0 — shift and scale into roughly [-1, 1].
 	floor := float32(maxVal - 8.0)
 	for i := range out {
 		v := out[i]
@@ -126,5 +113,25 @@ func computeMelSpectrogram(samples []float32, nMels int) []float32 {
 		out[i] = (v + 4.0) / 4.0
 	}
 
+	return out, stftFrames
+}
+
+// extractMelWindow copies frames [seek, seek+size) from the full mel spectrogram
+// into a contiguous buffer of exactly nMels*whisperNFrames elements, zero-padding
+// if fewer than whisperNFrames frames are available.
+func extractMelWindow(mel []float32, totalFrames, nMels, seek, size int) []float32 {
+	if size > whisperNFrames {
+		size = whisperNFrames
+	}
+	if seek+size > totalFrames {
+		size = totalFrames - seek
+	}
+
+	out := make([]float32, nMels*whisperNFrames)
+	for bin := range nMels {
+		srcBase := bin * totalFrames
+		dstBase := bin * whisperNFrames
+		copy(out[dstBase:dstBase+size], mel[srcBase+seek:srcBase+seek+size])
+	}
 	return out
 }
