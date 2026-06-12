@@ -85,7 +85,7 @@ func TestFullFlow(t *testing.T) {
 		t.Fatalf("Transcribe: %v", err)
 	}
 
-	t.Logf("Language: %s", result.Language)
+	t.Logf("Language: %s", result.Info.Language)
 	t.Logf("Text:     %s", result.Text)
 	for _, seg := range result.Segments {
 		t.Logf("  [%s → %s] %s", seg.Start, seg.End, seg.Text)
