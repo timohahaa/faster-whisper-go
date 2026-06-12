@@ -15,13 +15,13 @@ const maxSamples = whisperSampleRate * whisperChunkLen // 480000
 // Output text is in the original spoken language.
 // For audio longer than 30 seconds, only the first 30 seconds are processed.
 func (m *Model) Transcribe(ctx context.Context, samples []float32, cfg TranscribeConfig) (*Result, error) {
-	return m.infer(ctx, samples, cfg, transcribeToken())
+	return m.infer(ctx, samples, cfg, tokenTranscribe)
 }
 
 // Translate runs speech recognition and translates the result into English.
 // For audio longer than 30 seconds, only the first 30 seconds are processed.
 func (m *Model) Translate(ctx context.Context, samples []float32, cfg TranscribeConfig) (*Result, error) {
-	return m.infer(ctx, samples, cfg, translateToken())
+	return m.infer(ctx, samples, cfg, tokenTranslate)
 }
 
 func (m *Model) infer(ctx context.Context, samples []float32, cfg TranscribeConfig, taskToken int32) (*Result, error) {
@@ -99,15 +99,15 @@ func (m *Model) infer(ctx context.Context, samples []float32, cfg TranscribeConf
 }
 
 // DetectLanguage identifies the spoken language from the first 30 seconds of audio.
-func (m *Model) DetectLanguage(ctx context.Context, samples []float32) (string, float32, error) {
+func (m *Model) DetectLanguage(ctx context.Context, samples []float32) (LanguageDetection, error) {
 	if m == nil || m.bridge == nil {
-		return "", 0, errors.New("model is closed")
+		return LanguageDetection{}, errors.New("model is closed")
 	}
 	if len(samples) == 0 {
-		return "", 0, errors.New("samples are empty")
+		return LanguageDetection{}, errors.New("samples are empty")
 	}
 	if err := ctx.Err(); err != nil {
-		return "", 0, err
+		return LanguageDetection{}, err
 	}
 
 	audio := padOrTrim(samples, maxSamples)
@@ -115,13 +115,16 @@ func (m *Model) DetectLanguage(ctx context.Context, samples []float32) (string, 
 
 	result, err := m.bridge.DetectLanguage(mel, m.nMels, whisperNFrames)
 	if err != nil {
-		return "", 0, err
+		return LanguageDetection{}, err
 	}
-	return result.Language, result.Probability, nil
+	return LanguageDetection{
+		Language:    result.Language,
+		Probability: result.Probability,
+	}, nil
 }
 
 func (m *Model) buildPrompt(lang string, cfg TranscribeConfig, taskToken int32) []int32 {
-	prompt := []int32{sotToken()}
+	prompt := []int32{tokenSOT}
 
 	if m.IsMultilingual() && lang != "" {
 		langTok := m.tokenizer.LanguageToken(lang)
@@ -132,7 +135,7 @@ func (m *Model) buildPrompt(lang string, cfg TranscribeConfig, taskToken int32) 
 	}
 
 	if !cfg.Timestamps {
-		prompt = append(prompt, noTimestampsToken())
+		prompt = append(prompt, tokenNoTimestamps)
 	}
 
 	return prompt

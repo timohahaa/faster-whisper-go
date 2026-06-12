@@ -4,21 +4,31 @@ import "math"
 
 const (
 	whisperSampleRate = 16000
-	whisperNMels80    = 80
-	whisperNMels128   = 128
-	whisperChunkLen   = 30 // seconds
-	whisperNFrames    = 3000
+	whisperNMels80    = 80  // mel bins for Whisper v1/v2 models
+	whisperNMels128   = 128 // mel bins for Whisper large-v3
+	whisperChunkLen   = 30  // seconds
+	// whisperNFrames is the number of STFT frames in one 30-second chunk:
+	// sampleRate * chunkLen / hopLength = 16000 * 30 / 160 = 3000.
+	whisperNFrames = 3000
 )
 
+// hzToMel converts frequency in Hz to the mel scale using the HTK formula
+// mel = 2595 * log10(1 + hz/700).
+// The mel scale models human nonlinear pitch perception: low frequencies
+// are resolved in fine detail while high frequencies are compressed.
 func hzToMel(hz float64) float64 {
 	return 2595.0 * math.Log10(1.0+hz/700.0)
 }
 
+// melToHz is the inverse of hzToMel.
 func melToHz(mel float64) float64 {
 	return 700.0 * (math.Pow(10.0, mel/2595.0) - 1.0)
 }
 
-// computeMelFilterbank builds triangular mel filterbank of shape [nMels][nFFT/2+1].
+// computeMelFilterbank builds a bank of nMels triangular band-pass filters
+// of shape [nMels][nFFT/2+1]. Center frequencies are evenly spaced on the mel
+// scale. Each filter has a rising slope from its left neighbor's center to its
+// own center, and a falling slope from its center to its right neighbor's center.
 func computeMelFilterbank(nMels, nFFT, sampleRate int) [][]float32 {
 	freqBins := nFFT/2 + 1
 	melMin := hzToMel(0)
@@ -55,7 +65,9 @@ func computeMelFilterbank(nMels, nFFT, sampleRate int) [][]float32 {
 			}
 		}
 
-		// Slaney normalization: divide by mel band width
+		// Slaney normalization: scale each triangle by 2/(f_right - f_left) so its
+		// area is constant. This ensures narrow low-frequency bands and wide
+		// high-frequency bands contribute comparable energy values.
 		enorm := 2.0 / (hzPoints[i+2] - hzPoints[i])
 		for j := range freqBins {
 			filters[i][j] *= float32(enorm)
@@ -85,10 +97,18 @@ func computeMelSpectrogram(samples []float32, nMels int) []float32 {
 		}
 	}
 
-	// Log scale (matching whisper: log10, then *10 for dB-like, but whisper actually
-	// uses log_spec = torch.clamp(mel_spec, min=1e-10).log10()
-	// then log_spec = torch.maximum(log_spec, log_spec.max() - 8.0)
-	// then (log_spec + 4.0) / 4.0
+	// Log-normalization matching faster-whisper's Python preprocessing (three steps):
+	//
+	// 1) log10(clamp(x, min=1e-10)) — compress dynamic range via log; clamp
+	//    prevents log(0). Values are now roughly in [-10, 0].
+	//
+	// 2) max(x, global_max - 8.0) — floor the dynamic range to ~80 dB below
+	//    the loudest bin (8 orders of magnitude in log10). Anything quieter
+	//    is treated as silence.
+	//
+	// 3) (x + 4.0) / 4.0 — shift and scale into roughly [-1, 1]. Typical
+	//    log10 mel energies lie in [-8, 0]; adding 4 centers the range,
+	//    dividing by 4 normalizes it.
 	maxVal := math.Inf(-1)
 	for i := range mel {
 		v := math.Log10(math.Max(mel[i], 1e-10))

@@ -5,8 +5,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
+	"slices"
 	"strings"
+	"unicode/utf8"
 )
 
 // Well-known Whisper special token offsets (relative to base vocab size of 50257).
@@ -25,15 +26,15 @@ const (
 	tokenTranscribe int32 = 50359
 )
 
-// Tokenizer decodes Whisper token IDs to text.
-type Tokenizer struct {
+// tokenizer decodes Whisper token IDs to text.
+type tokenizer struct {
 	idToToken   map[int32]string
 	langToToken map[string]int32
 	byteDecoder map[rune]byte
 }
 
-// LoadTokenizer parses tokenizer.json from a model directory.
-func LoadTokenizer(modelDir string) (*Tokenizer, error) {
+// loadTokenizer parses tokenizer.json from a model directory.
+func loadTokenizer(modelDir string) (*tokenizer, error) {
 	path := filepath.Join(modelDir, "tokenizer.json")
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -53,7 +54,7 @@ func LoadTokenizer(modelDir string) (*Tokenizer, error) {
 		return nil, fmt.Errorf("parse tokenizer.json: %w", err)
 	}
 
-	t := &Tokenizer{
+	t := &tokenizer{
 		idToToken:   make(map[int32]string, len(raw.Model.Vocab)+len(raw.AddedTokens)),
 		langToToken: make(map[string]int32),
 		byteDecoder: buildByteDecoder(),
@@ -74,7 +75,7 @@ func LoadTokenizer(modelDir string) (*Tokenizer, error) {
 }
 
 // Decode converts token IDs into text, skipping special tokens.
-func (t *Tokenizer) Decode(ids []int32) string {
+func (t *tokenizer) Decode(ids []int32) string {
 	var buf strings.Builder
 	for _, id := range ids {
 		if t.IsSpecial(id) {
@@ -91,7 +92,7 @@ func (t *Tokenizer) Decode(ids []int32) string {
 
 // DecodeSegmentTokens extracts text segments with timestamp boundaries.
 // It groups tokens between consecutive timestamp token pairs.
-func (t *Tokenizer) DecodeSegmentTokens(ids []int32) []rawSegment {
+func (t *tokenizer) DecodeSegmentTokens(ids []int32) []rawSegment {
 	var segments []rawSegment
 	var current rawSegment
 	var textTokens []int32
@@ -131,22 +132,25 @@ func (t *Tokenizer) DecodeSegmentTokens(ids []int32) []rawSegment {
 }
 
 // IsTimestamp reports whether a token ID is a timestamp token.
-func (t *Tokenizer) IsTimestamp(id int32) bool {
+func (t *tokenizer) IsTimestamp(id int32) bool {
 	return id >= tokenTimestampBeg
 }
 
 // TimestampValue returns the time in seconds for a timestamp token.
-func (t *Tokenizer) TimestampValue(id int32) float64 {
+// Whisper timestamp tokens have a fixed resolution of 20 ms: token
+// (tokenTimestampBeg + N) corresponds to the moment N * 0.02 s.
+// ~1500 tokens cover a full 30-second chunk.
+func (t *tokenizer) TimestampValue(id int32) float64 {
 	return float64(id-tokenTimestampBeg) * 0.02
 }
 
 // IsSpecial reports whether a token ID is a special (non-text) token.
-func (t *Tokenizer) IsSpecial(id int32) bool {
+func (t *tokenizer) IsSpecial(id int32) bool {
 	return id >= tokenEOT
 }
 
 // LanguageToken returns the token ID for a language code, or -1 if not found.
-func (t *Tokenizer) LanguageToken(lang string) int32 {
+func (t *tokenizer) LanguageToken(lang string) int32 {
 	if id, ok := t.langToToken[lang]; ok {
 		return id
 	}
@@ -167,26 +171,35 @@ func isLangToken(s string) bool {
 
 // decodeToken converts a GPT-2 BPE token string to its UTF-8 representation.
 // GPT-2 uses a byte-level encoding where certain unicode chars map to bytes.
-func (t *Tokenizer) decodeToken(token string) string {
+func (t *tokenizer) decodeToken(token string) string {
 	var buf []byte
 	for _, r := range token {
 		if b, ok := t.byteDecoder[r]; ok {
 			buf = append(buf, b)
 		} else {
-			buf = append(buf, []byte(string(r))...)
+			buf = utf8.AppendRune(buf, r)
 		}
 	}
 	return string(buf)
 }
 
 // buildByteDecoder builds the inverse of GPT-2's bytes_to_unicode mapping.
+//
+// GPT-2 BPE represents every byte (0-255) as a printable Unicode character so
+// the vocabulary never contains invisible control chars or whitespace.
+//
+// The 188 "safe" bytes (printable ASCII '!'-'~', Latin-1 Supplement '¡'-'¬'
+// and '®'-'ÿ') map to the same Unicode codepoint (identity). The remaining
+// 68 bytes (space, tab, newline, DEL, other control chars) are assigned to
+// codepoints starting at U+0100 (Ā, ā, Ă, …).
+//
+// byteDecoder is the reverse table: given a Unicode rune from a BPE token
+// string, it returns the original byte value.
 func buildByteDecoder() map[rune]byte {
-	// GPT-2 maps bytes 0-255 to specific unicode characters to avoid
-	// whitespace/control characters in the vocab.
 	bs := make([]int, 0, 256)
 	cs := make([]int, 0, 256)
 
-	// printable byte ranges that map to themselves
+	// Safe byte ranges that map to themselves (identity mapping).
 	for i := int('!'); i <= int('~'); i++ {
 		bs = append(bs, i)
 		cs = append(cs, i)
@@ -200,16 +213,10 @@ func buildByteDecoder() map[rune]byte {
 		cs = append(cs, i)
 	}
 
+	// Remaining bytes (control chars, space, DEL, etc.) are mapped to U+0100..U+0143.
 	n := 0
 	for i := range 256 {
-		found := false
-		for _, b := range bs {
-			if b == i {
-				found = true
-				break
-			}
-		}
-		if !found {
+		if !slices.Contains(bs, i) {
 			bs = append(bs, i)
 			cs = append(cs, 256+n)
 			n++
@@ -221,28 +228,4 @@ func buildByteDecoder() map[rune]byte {
 		decoder[rune(c)] = byte(bs[i])
 	}
 	return decoder
-}
-
-// Special token accessors used for prompt construction.
-func sotToken() int32          { return tokenSOT }
-func eotToken() int32          { return tokenEOT }
-func transcribeToken() int32   { return tokenTranscribe }
-func translateToken() int32    { return tokenTranslate }
-func noTimestampsToken() int32 { return tokenNoTimestamps }
-
-// FormatTimestamp formats seconds as "MM:SS.mmm" or "HH:MM:SS.mmm".
-func FormatTimestamp(seconds float64) string {
-	h := int(seconds) / 3600
-	m := (int(seconds) % 3600) / 60
-	s := seconds - float64(h*3600+m*60)
-	if h > 0 {
-		return fmt.Sprintf("%d:%02d:%s", h, m, formatSec(s))
-	}
-	return fmt.Sprintf("%02d:%s", m, formatSec(s))
-}
-
-func formatSec(s float64) string {
-	whole := int(s)
-	frac := int((s - float64(whole)) * 1000)
-	return strconv.Itoa(whole) + "." + fmt.Sprintf("%03d", frac)
 }

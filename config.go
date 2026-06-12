@@ -6,10 +6,12 @@ type ModelConfig struct {
 	ComputeType string // "int8", "float16", "float32", "default"
 }
 
-// DefaultModelConfig provides sensible defaults for CPU inference
-var DefaultModelConfig = ModelConfig{
-	Device:      "cpu",
-	ComputeType: "default",
+// DefaultModelConfig returns sensible defaults for CPU inference.
+func DefaultModelConfig() ModelConfig {
+	return ModelConfig{
+		Device:      "cpu",
+		ComputeType: "default",
+	}
 }
 
 // TranscribeConfig controls inference parameters
@@ -21,9 +23,11 @@ type TranscribeConfig struct {
 	Timestamps  bool    // extract per-segment timestamps
 }
 
-// DefaultTranscribeConfig provides sensible defaults for transcription.
-var DefaultTranscribeConfig = TranscribeConfig{
-	BeamSize:   5,
-	BestOf:     1,
-	Timestamps: true,
+// DefaultTranscribeConfig returns sensible defaults for transcription.
+func DefaultTranscribeConfig() TranscribeConfig {
+	return TranscribeConfig{
+		BeamSize:   5,
+		BestOf:     1,
+		Timestamps: true,
+	}
 }

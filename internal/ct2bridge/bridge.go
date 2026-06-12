@@ -9,7 +9,6 @@ package ct2bridge
 import "C"
 import (
 	"errors"
-	"fmt"
 	"unsafe"
 )
 
@@ -94,10 +93,7 @@ func (m *Model) Generate(mel []float32, nMels, nFrames int, prompt []int32, opts
 		return GenerateResult{}, errors.New("prompt tokens are required")
 	}
 
-	var promptPtr *C.int32_t
-	if len(prompt) > 0 {
-		promptPtr = (*C.int32_t)(unsafe.Pointer(&prompt[0]))
-	}
+	promptPtr := (*C.int32_t)(unsafe.Pointer(&prompt[0]))
 
 	result := C.ct2_generate(
 		m.ptr,
@@ -128,46 +124,6 @@ func (m *Model) Generate(mel []float32, nMels, nFrames int, prompt []int32, opts
 	}
 	if result.sequences_count > 0 {
 		out.SequenceIDs = cInt32Slice(result.sequences_ids, int(result.sequences_count))
-	}
-	return out, nil
-}
-
-// EncodeResult holds encoder output from the C bridge.
-type EncodeResult struct {
-	Data  []float32
-	Shape []int
-}
-
-// Encode runs the Whisper encoder on a mel spectrogram.
-func (m *Model) Encode(mel []float32, nMels, nFrames int) (EncodeResult, error) {
-	if m == nil || m.ptr == nil {
-		return EncodeResult{}, errors.New("model is closed")
-	}
-	if len(mel) == 0 {
-		return EncodeResult{}, errors.New("mel spectrogram is required")
-	}
-
-	result := C.ct2_encode(
-		m.ptr,
-		(*C.float)(unsafe.Pointer(&mel[0])),
-		C.size_t(nMels),
-		C.size_t(nFrames),
-	)
-	defer C.ct2_encode_result_free(&result)
-
-	if result.error != nil {
-		return EncodeResult{}, errors.New(C.GoString(result.error))
-	}
-
-	out := EncodeResult{
-		Shape: cSizeSlice(result.shape, int(result.shape_len)),
-	}
-	if result.data != nil {
-		count := 1
-		for _, dim := range out.Shape {
-			count *= dim
-		}
-		out.Data = cFloatSlice(result.data, count)
 	}
 	return out, nil
 }
@@ -212,33 +168,4 @@ func cInt32Slice(ptr *C.int32_t, count int) []int32 {
 	out := make([]int32, count)
 	copy(out, unsafe.Slice((*int32)(unsafe.Pointer(ptr)), count))
 	return out
-}
-
-func cFloatSlice(ptr *C.float, count int) []float32 {
-	if ptr == nil || count == 0 {
-		return nil
-	}
-	out := make([]float32, count)
-	copy(out, unsafe.Slice((*float32)(unsafe.Pointer(ptr)), count))
-	return out
-}
-
-func cSizeSlice(ptr *C.size_t, count int) []int {
-	if ptr == nil || count == 0 {
-		return nil
-	}
-	raw := unsafe.Slice(ptr, count)
-	out := make([]int, count)
-	for i, value := range raw {
-		out[i] = int(value)
-	}
-	return out
-}
-
-// String returns a short debug representation of the model handle.
-func (m *Model) String() string {
-	if m == nil || m.ptr == nil {
-		return "ct2bridge.Model(nil)"
-	}
-	return fmt.Sprintf("ct2bridge.Model(%p)", m.ptr)
 }

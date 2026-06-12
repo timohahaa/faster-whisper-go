@@ -15,3 +15,9 @@ type Segment struct {
 	End   time.Duration
 	Text  string
 }
+
+// LanguageDetection holds the result of language identification.
+type LanguageDetection struct {
+	Language    string
+	Probability float32
+}

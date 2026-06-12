@@ -60,12 +60,6 @@ ct2_generate_result make_generate_error(const char* message) {
     return result;
 }
 
-ct2_encode_result make_encode_error(const char* message) {
-    ct2_encode_result result{};
-    result.error = copy_string(message);
-    return result;
-}
-
 ct2_detect_result make_detect_error(const char* message) {
     ct2_detect_result result{};
     result.error = copy_string(message);
@@ -195,54 +189,6 @@ ct2_generate_result ct2_generate(
     }
 }
 
-ct2_encode_result ct2_encode(
-    ct2_model* m,
-    const float* mel, size_t n_mels, size_t n_frames) {
-    if (m == nullptr || m->whisper == nullptr) {
-        return make_encode_error("model is null");
-    }
-    if (mel == nullptr || n_mels == 0 || n_frames == 0) {
-        return make_encode_error("mel spectrogram is required");
-    }
-
-    try {
-        ctranslate2::StorageView features = make_mel_features(mel, n_mels, n_frames);
-        ctranslate2::StorageView encoded =
-            m->whisper->encode(features, /*to_cpu=*/true).get();
-
-        ctranslate2::StorageView encoded_cpu = encoded.device() == ctranslate2::Device::CPU
-            ? encoded
-            : encoded.to(ctranslate2::Device::CPU);
-
-        if (encoded_cpu.dtype() != ctranslate2::DataType::FLOAT32) {
-            encoded_cpu = encoded_cpu.to_float32();
-        }
-
-        const auto& shape = encoded_cpu.shape();
-        const size_t element_count = static_cast<size_t>(encoded_cpu.size());
-
-        ct2_encode_result out{};
-        out.shape_len = shape.size();
-        out.shape = static_cast<size_t*>(std::malloc(out.shape_len * sizeof(size_t)));
-        out.data = static_cast<float*>(std::malloc(element_count * sizeof(float)));
-        if (out.shape == nullptr || out.data == nullptr) {
-            ct2_encode_result_free(&out);
-            return make_encode_error("failed to allocate encode result");
-        }
-
-        for (size_t i = 0; i < out.shape_len; ++i) {
-            out.shape[i] = static_cast<size_t>(shape[i]);
-        }
-        std::memcpy(
-            out.data,
-            encoded_cpu.data<float>(),
-            element_count * sizeof(float));
-        return out;
-    } catch (const std::exception& e) {
-        return make_encode_error(e.what());
-    }
-}
-
 ct2_detect_result ct2_detect_language(
     ct2_model* m,
     const float* mel, size_t n_mels, size_t n_frames) {
@@ -290,19 +236,6 @@ void ct2_generate_result_free(ct2_generate_result* r) {
     r->sequences_ids = nullptr;
     r->error = nullptr;
     r->sequences_count = 0;
-}
-
-void ct2_encode_result_free(ct2_encode_result* r) {
-    if (r == nullptr) {
-        return;
-    }
-    std::free(r->data);
-    std::free(r->shape);
-    std::free(r->error);
-    r->data = nullptr;
-    r->shape = nullptr;
-    r->error = nullptr;
-    r->shape_len = 0;
 }
 
 void ct2_detect_result_free(ct2_detect_result* r) {

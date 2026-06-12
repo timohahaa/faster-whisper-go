@@ -19,13 +19,6 @@ typedef struct {
 } ct2_generate_result;
 
 typedef struct {
-    float* data;
-    size_t* shape;
-    size_t shape_len;
-    char* error;
-} ct2_encode_result;
-
-typedef struct {
     char* language;
     float probability;
     char* error;
@@ -45,16 +38,11 @@ ct2_generate_result ct2_generate(
     float repetition_penalty, int no_repeat_ngram_size,
     int max_length, bool suppress_blank, bool return_scores);
 
-ct2_encode_result ct2_encode(
-    ct2_model* m,
-    const float* mel, size_t n_mels, size_t n_frames);
-
 ct2_detect_result ct2_detect_language(
     ct2_model* m,
     const float* mel, size_t n_mels, size_t n_frames);
 
 void ct2_generate_result_free(ct2_generate_result* r);
-void ct2_encode_result_free(ct2_encode_result* r);
 void ct2_detect_result_free(ct2_detect_result* r);
 
 #ifdef __cplusplus

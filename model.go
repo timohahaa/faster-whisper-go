@@ -9,7 +9,7 @@ import (
 // Model is a loaded Whisper model ready for transcription.
 type Model struct {
 	bridge    *ct2bridge.Model
-	tokenizer *Tokenizer
+	tokenizer *tokenizer
 	nMels     int
 }
 
@@ -29,7 +29,7 @@ func Load(modelDir string, cfg ModelConfig) (*Model, error) {
 		return nil, fmt.Errorf("load ct2 model: %w", err)
 	}
 
-	tok, err := LoadTokenizer(modelDir)
+	tok, err := loadTokenizer(modelDir)
 	if err != nil {
 		bridge.Close()
 		return nil, fmt.Errorf("load tokenizer: %w", err)
