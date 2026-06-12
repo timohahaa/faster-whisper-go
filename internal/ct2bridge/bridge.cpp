@@ -1,6 +1,7 @@
 #include "bridge.h"
 
 #include <cstring>
+#include <future>
 #include <memory>
 #include <string>
 #include <vector>
@@ -138,8 +139,10 @@ ct2_generate_result ct2_generate(
     try {
         ctranslate2::StorageView features = make_mel_features(mel, n_mels, n_frames);
 
-        std::vector<int32_t> prompt(
-            prompt_tokens, prompt_tokens + prompt_count);
+        std::vector<size_t> prompt(prompt_count);
+        for (size_t i = 0; i < prompt_count; ++i) {
+            prompt[i] = static_cast<size_t>(prompt_tokens[i]);
+        }
 
         ctranslate2::models::WhisperOptions options;
         options.beam_size = beam_size > 0 ? static_cast<size_t>(beam_size) : 1;
@@ -154,31 +157,33 @@ ct2_generate_result ct2_generate(
         options.return_scores = return_scores;
         options.return_no_speech_prob = true;
 
-        const std::vector<std::vector<int32_t>> prompts = {prompt};
-        const std::vector<ctranslate2::models::WhisperGenerationResult> results =
+        const std::vector<std::vector<size_t>> prompts = {prompt};
+        std::vector<std::future<ctranslate2::models::WhisperGenerationResult>> futures =
             m->whisper->generate(features, prompts, options);
 
-        if (results.empty()) {
+        if (futures.empty()) {
             return make_generate_error("generate returned no results");
         }
+
+        const std::vector<ctranslate2::models::WhisperGenerationResult> results = {
+            futures.front().get()};
 
         const auto& result = results.front();
         if (result.sequences_ids.empty()) {
             return make_generate_error("generate returned no token sequences");
         }
 
-        const std::vector<int32_t>& sequence = result.sequences_ids.front();
+        const std::vector<size_t>& sequence_raw = result.sequences_ids.front();
         ct2_generate_result out{};
-        out.sequences_count = sequence.size();
+        out.sequences_count = sequence_raw.size();
         out.sequences_ids = static_cast<int32_t*>(std::malloc(
             out.sequences_count * sizeof(int32_t)));
         if (out.sequences_ids == nullptr) {
             return make_generate_error("failed to allocate token sequence");
         }
-        std::memcpy(
-            out.sequences_ids,
-            sequence.data(),
-            out.sequences_count * sizeof(int32_t));
+        for (size_t i = 0; i < out.sequences_count; ++i) {
+            out.sequences_ids[i] = static_cast<int32_t>(sequence_raw[i]);
+        }
 
         if (result.has_scores()) {
             out.score = result.scores.front();
@@ -250,14 +255,20 @@ ct2_detect_result ct2_detect_language(
 
     try {
         ctranslate2::StorageView features = make_mel_features(mel, n_mels, n_frames);
-        const std::vector<std::vector<std::pair<std::string, float>>> results =
+        std::vector<std::future<std::vector<std::pair<std::string, float>>>> futures =
             m->whisper->detect_language(features);
 
-        if (results.empty() || results.front().empty()) {
+        if (futures.empty()) {
             return make_detect_error("detect_language returned no results");
         }
 
-        const auto& best = results.front().front();
+        const std::vector<std::pair<std::string, float>> results = futures.front().get();
+
+        if (results.empty()) {
+            return make_detect_error("detect_language returned no results");
+        }
+
+        const auto& best = results.front();
         ct2_detect_result out{};
         out.language = copy_string(best.first);
         out.probability = best.second;
