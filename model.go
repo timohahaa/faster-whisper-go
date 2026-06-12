@@ -2,6 +2,7 @@ package whisper
 
 import (
 	"fmt"
+	"os"
 
 	"github.com/timohahaa/faster-whisper-go/internal/ct2bridge"
 )
@@ -13,8 +14,31 @@ type Model struct {
 	nMels     int
 }
 
-// Load opens a Whisper model from a CTranslate2 model directory.
-func Load(modelDir string, cfg ModelConfig) (*Model, error) {
+// Load opens a Whisper model. The model argument can be:
+//   - a local directory path (e.g. "/path/to/model" or "./models/large-v3")
+//   - a short model name (e.g. "large-v3") mapped to a Hugging Face repo
+//   - a full Hugging Face repo ID (e.g. "Systran/faster-whisper-large-v3")
+//
+// Remote models are downloaded and cached locally before loading.
+func Load(model string, cfg ModelConfig) (*Model, error) {
+	modelDir := model
+
+	// Not a local directory — treat as a model name and download from Hugging Face.
+	if info, err := os.Stat(model); err != nil || !info.IsDir() {
+		repoID, err := resolveModelName(model)
+		if err != nil {
+			return nil, err
+		}
+		modelDir, err = downloadModel(repoID, cfg)
+		if err != nil {
+			return nil, fmt.Errorf("download model: %w", err)
+		}
+	}
+
+	if err := validateModelDir(modelDir); err != nil {
+		return nil, err
+	}
+
 	device := cfg.Device
 	if device == "" {
 		device = "cpu"
