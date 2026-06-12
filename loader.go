@@ -27,7 +27,7 @@ var (
 		"large-v3":  "Systran/faster-whisper-large-v3",
 	}
 
-	requiredFiles = []string{"model.bin", "tokenizer.json", "config.json"}
+	requiredFiles = []string{"model.bin", "tokenizer.json", "config.json", "vocabulary.txt"}
 	optionalFiles = []string{"vocabulary.json", "preprocessor_config.json"}
 
 	hfBaseURL = "https://huggingface.co"

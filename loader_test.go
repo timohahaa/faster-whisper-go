@@ -269,6 +269,7 @@ func TestFetchRepoFiles(t *testing.T) {
 			"model.bin":                "weights",
 			"tokenizer.json":          "{}",
 			"config.json":             "{}",
+			"vocabulary.txt":          "vocab",
 			"vocabulary.json":         "{}",
 			"preprocessor_config.json": "{}",
 			"README.md":               "readme",
@@ -286,7 +287,7 @@ func TestFetchRepoFiles(t *testing.T) {
 
 		want := map[string]bool{
 			"model.bin": true, "tokenizer.json": true, "config.json": true,
-			"vocabulary.json": true, "preprocessor_config.json": true,
+			"vocabulary.txt": true, "vocabulary.json": true, "preprocessor_config.json": true,
 		}
 		if len(files) != len(want) {
 			t.Fatalf("got %d files, want %d", len(files), len(want))
@@ -303,6 +304,7 @@ func TestFetchRepoFiles(t *testing.T) {
 			"model.bin":       "weights",
 			"tokenizer.json":  "{}",
 			"config.json":     "{}",
+			"vocabulary.txt":  "vocab",
 		}, "")
 		defer srv.Close()
 
@@ -314,8 +316,8 @@ func TestFetchRepoFiles(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(files) != 3 {
-			t.Fatalf("got %d files, want 3", len(files))
+		if len(files) != 4 {
+			t.Fatalf("got %d files, want 4", len(files))
 		}
 	})
 
@@ -323,6 +325,7 @@ func TestFetchRepoFiles(t *testing.T) {
 		srv := newTestHFServer(t, map[string]string{
 			"tokenizer.json": "{}",
 			"config.json":    "{}",
+			"vocabulary.txt": "vocab",
 		}, "")
 		defer srv.Close()
 
@@ -344,6 +347,7 @@ func TestFetchRepoFiles(t *testing.T) {
 			"model.bin":      "w",
 			"tokenizer.json": "{}",
 			"config.json":    "{}",
+			"vocabulary.txt": "vocab",
 		}, "secret")
 		defer srv.Close()
 
@@ -360,8 +364,8 @@ func TestFetchRepoFiles(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if len(files) != 3 {
-			t.Fatalf("got %d files, want 3", len(files))
+		if len(files) != 4 {
+			t.Fatalf("got %d files, want 4", len(files))
 		}
 	})
 }
@@ -436,6 +440,7 @@ func TestDownloadModel(t *testing.T) {
 		"model.bin":       "weights",
 		"tokenizer.json":  `{"model":{"vocab":{}}}`,
 		"config.json":     `{}`,
+		"vocabulary.txt":  "vocab",
 		"vocabulary.json": `{}`,
 	}, "")
 	defer srv.Close()
@@ -452,7 +457,7 @@ func TestDownloadModel(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for _, f := range []string{"model.bin", "tokenizer.json", "config.json", "vocabulary.json"} {
+	for _, f := range []string{"model.bin", "tokenizer.json", "config.json", "vocabulary.txt", "vocabulary.json"} {
 		if _, err := os.Stat(filepath.Join(dir, f)); err != nil {
 			t.Errorf("expected %s to exist: %v", f, err)
 		}
