@@ -36,6 +36,19 @@ func TestDownloadModelFromHF(t *testing.T) {
 	}
 
 	t.Log("OK: all required files present")
+
+	// Second call should use cache — no re-download.
+	dir2, err := downloadModel(repoID, cfg)
+	if err != nil {
+		t.Fatalf("second downloadModel: %v", err)
+	}
+	if dir2 != dir {
+		t.Errorf("cache miss: got %q, want %q", dir2, dir)
+	}
+	if err := validateModelDir(dir2); err != nil {
+		t.Fatalf("validation after cache hit: %v", err)
+	}
+	t.Log("OK: cache hit, no re-download")
 }
 
 func formatSize(b int64) string {
