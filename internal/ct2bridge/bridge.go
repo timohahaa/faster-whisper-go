@@ -204,6 +204,61 @@ func (m *Model) DetectLanguage(enc *EncoderOutput) (DetectLanguageResult, error)
 	}, nil
 }
 
+// AlignResult holds token-to-frame alignment weights from the Whisper align pass.
+type AlignResult struct {
+	Weights   []float32 // flattened [NumTokens x NumFrames], row-major
+	NumTokens int
+	NumFrames int
+}
+
+// Align computes cross-attention alignment between text tokens and audio frames.
+// Used for word-level timestamp extraction.
+func (m *Model) Align(enc *EncoderOutput, startSeq, textTokens []int32, numFrames, medianFilterWidth int) (AlignResult, error) {
+	if m == nil || m.ptr == nil {
+		return AlignResult{}, errors.New("model is closed")
+	}
+	if enc == nil || enc.ptr == nil {
+		return AlignResult{}, errors.New("encoder output is required")
+	}
+	if len(textTokens) == 0 {
+		return AlignResult{}, errors.New("text tokens are required")
+	}
+
+	var startPtr *C.int32_t
+	if len(startSeq) > 0 {
+		startPtr = (*C.int32_t)(unsafe.Pointer(&startSeq[0]))
+	}
+	textPtr := (*C.int32_t)(unsafe.Pointer(&textTokens[0]))
+
+	result := C.ct2_align(
+		m.ptr,
+		enc.ptr,
+		startPtr,
+		C.size_t(len(startSeq)),
+		textPtr,
+		C.size_t(len(textTokens)),
+		C.size_t(numFrames),
+		C.int(medianFilterWidth),
+	)
+	defer C.ct2_align_result_free(&result)
+
+	if result.error != nil {
+		return AlignResult{}, errors.New(C.GoString(result.error))
+	}
+
+	totalSize := int(result.num_tokens) * int(result.num_frames)
+	weights := make([]float32, totalSize)
+	if totalSize > 0 && result.weights != nil {
+		copy(weights, unsafe.Slice((*float32)(unsafe.Pointer(result.weights)), totalSize))
+	}
+
+	return AlignResult{
+		Weights:   weights,
+		NumTokens: int(result.num_tokens),
+		NumFrames: int(result.num_frames),
+	}, nil
+}
+
 func cInt32Slice(ptr *C.int32_t, count int) []int32 {
 	if ptr == nil || count == 0 {
 		return nil

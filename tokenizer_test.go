@@ -10,6 +10,7 @@ func makeTestTokenizer() *tokenizer {
 		idToToken:   make(map[int32]string),
 		tokenToID:   make(map[string]int32),
 		langToToken: make(map[string]int32),
+		mergeRank:   make(map[string]int),
 	}
 	buildByteDecoderInto(t)
 	t.byteEncoder = buildByteEncoder(t)
@@ -168,7 +169,6 @@ func TestSplitSegmentsByTimestamps(t *testing.T) {
 		ts50 := tokenTimestampBeg + 50   // 1.00
 		ts150 := tokenTimestampBeg + 150 // 3.00
 
-		// With EOT at end: singleTimestampEnding=false, only first segment before consecutive pair
 		tokens := []int32{ts0, 0, 1, ts50, ts50, 2, 3, ts150, tokenEOT}
 		result := tok.SplitSegmentsByTimestamps(tokens, 0.0, 3000, 30.0, 0)
 
@@ -180,10 +180,6 @@ func TestSplitSegmentsByTimestamps(t *testing.T) {
 		if seg0.start != 0.0 || seg0.end != 1.0 {
 			t.Errorf("seg[0] time: got [%f, %f], want [0.0, 1.0]", seg0.start, seg0.end)
 		}
-
-		if result.singleTimestampEnding {
-			t.Error("singleTimestampEnding should be false with EOT at end")
-		}
 	})
 
 	t.Run("ConsecutiveWithSingleEnding", func(t *testing.T) {
@@ -191,7 +187,6 @@ func TestSplitSegmentsByTimestamps(t *testing.T) {
 		ts50 := tokenTimestampBeg + 50   // 1.00
 		ts150 := tokenTimestampBeg + 150 // 3.00
 
-		// Without EOT: singleTimestampEnding=true, both segments emitted
 		tokens := []int32{ts0, 0, 1, ts50, ts50, 2, 3, ts150}
 		result := tok.SplitSegmentsByTimestamps(tokens, 0.0, 3000, 30.0, 0)
 
@@ -209,33 +204,23 @@ func TestSplitSegmentsByTimestamps(t *testing.T) {
 			t.Errorf("seg[1] time: got [%f, %f], want [1.0, 3.0]", seg1.start, seg1.end)
 		}
 
-		if !result.singleTimestampEnding {
-			t.Error("singleTimestampEnding should be true")
-		}
 		if result.seek != 3000 {
 			t.Errorf("seek: got %d, want 3000", result.seek)
 		}
 	})
 
 	t.Run("SingleTimestampEndingNoConsecutive", func(t *testing.T) {
-		ts0 := tokenTimestampBeg
 		ts50 := tokenTimestampBeg + 50
 
-		// Single segment ending with a lone timestamp (no consecutive pair)
 		tokens := []int32{0, 1, ts50}
 		result := tok.SplitSegmentsByTimestamps(tokens, 0.0, 3000, 30.0, 0)
 
-		if !result.singleTimestampEnding {
-			t.Error("expected singleTimestampEnding=true")
-		}
 		if len(result.segments) != 1 {
 			t.Fatalf("expected 1 segment, got %d", len(result.segments))
 		}
-		// Last timestamp is 1.0s
 		if result.segments[0].end != 1.0 {
 			t.Errorf("end: got %f, want 1.0", result.segments[0].end)
 		}
-		_ = ts0
 	})
 
 	t.Run("NoTimestamps", func(t *testing.T) {

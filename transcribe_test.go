@@ -57,11 +57,23 @@ func TestApplyDefaults(t *testing.T) {
 	if len(cfg.Temperature) != 6 {
 		t.Errorf("Temperature: got %d entries, want 6", len(cfg.Temperature))
 	}
+	if cfg.CompressionRatioThreshold != 2.4 {
+		t.Errorf("CompressionRatioThreshold: got %f, want 2.4", cfg.CompressionRatioThreshold)
+	}
+	if cfg.LogProbThreshold != -1.0 {
+		t.Errorf("LogProbThreshold: got %f, want -1.0", cfg.LogProbThreshold)
+	}
+	if cfg.NoSpeechThreshold != 0.6 {
+		t.Errorf("NoSpeechThreshold: got %f, want 0.6", cfg.NoSpeechThreshold)
+	}
 	if cfg.PromptResetOnTemperature != 0.5 {
 		t.Errorf("PromptResetOnTemperature: got %f, want 0.5", cfg.PromptResetOnTemperature)
 	}
 	if cfg.MaxInitialTimestamp != 1.0 {
 		t.Errorf("MaxInitialTimestamp: got %f, want 1.0", cfg.MaxInitialTimestamp)
+	}
+	if len(cfg.SuppressTokens) != 1 || cfg.SuppressTokens[0] != -1 {
+		t.Errorf("SuppressTokens: got %v, want [-1]", cfg.SuppressTokens)
 	}
 }
 

@@ -53,8 +53,24 @@ ct2_detect_result ct2_detect_language(
     ct2_model* m,
     ct2_encoder_output* encoder_output);
 
+typedef struct {
+    size_t num_tokens;
+    size_t num_frames;
+    float* weights;
+    char* error;
+} ct2_align_result;
+
+ct2_align_result ct2_align(
+    ct2_model* m,
+    ct2_encoder_output* encoder_output,
+    const int32_t* start_sequence, size_t start_sequence_count,
+    const int32_t* text_tokens, size_t text_tokens_count,
+    size_t num_frames,
+    int median_filter_width);
+
 void ct2_generate_result_free(ct2_generate_result* r);
 void ct2_detect_result_free(ct2_detect_result* r);
+void ct2_align_result_free(ct2_align_result* r);
 
 #ifdef __cplusplus
 }

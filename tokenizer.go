@@ -35,9 +35,11 @@ type tokenizer struct {
 	tokenToID       map[string]int32
 	langToToken     map[string]int32
 	merges          []bpeMerge
+	mergeRank       map[string]int
 	byteDecoder     [512]byte
 	byteDecoderHigh map[rune]byte
 	byteEncoder     map[byte]rune
+	nonSpeechTokens []int32
 }
 
 type bpeMerge struct {
@@ -95,6 +97,11 @@ func loadTokenizer(modelDir string) (*tokenizer, error) {
 		}
 	}
 
+	t.mergeRank = make(map[string]int, len(t.merges))
+	for i, m := range t.merges {
+		t.mergeRank[m.a+" "+m.b] = i
+	}
+
 	return t, nil
 }
 
@@ -115,6 +122,9 @@ func (t *tokenizer) Decode(ids []int32) string {
 }
 
 // Encode converts text into token IDs using GPT-2 BPE.
+// Note: this is a simplified implementation that treats the entire input as one
+// BPE word (no regex-based pre-tokenization). Suitable for short texts like
+// prompts and hotwords.
 func (t *tokenizer) Encode(text string) []int32 {
 	if text == "" {
 		return nil
@@ -159,18 +169,13 @@ func (t *tokenizer) bpeEncode(word string) []int32 {
 		symbols = append(symbols, string(r))
 	}
 
-	mergeRank := make(map[string]int, len(t.merges))
-	for i, m := range t.merges {
-		mergeRank[m.a+" "+m.b] = i
-	}
-
 	for len(symbols) > 1 {
 		bestIdx := -1
 		bestRank := len(t.merges)
 
 		for i := 0; i < len(symbols)-1; i++ {
 			pair := symbols[i] + " " + symbols[i+1]
-			if rank, ok := mergeRank[pair]; ok && rank < bestRank {
+			if rank, ok := t.mergeRank[pair]; ok && rank < bestRank {
 				bestRank = rank
 				bestIdx = i
 			}
@@ -199,7 +204,12 @@ func (t *tokenizer) bpeEncode(word string) []int32 {
 
 // NonSpeechTokens returns the standard set of token IDs to suppress
 // to avoid non-speech annotations like ♪♪♪, (SPEAKING FOREIGN LANGUAGE), [DAVID], etc.
+// The result is cached after the first computation.
 func (t *tokenizer) NonSpeechTokens() []int32 {
+	if t.nonSpeechTokens != nil {
+		return t.nonSpeechTokens
+	}
+
 	symbols := []string{
 		`"`, "#", "(", ")", "*", "+", "/", ":", ";", "<", "=", ">", "@",
 		"[", "\\", "]", "^", "_", "`", "{", "|", "}", "~",
@@ -214,7 +224,6 @@ func (t *tokenizer) NonSpeechTokens() []int32 {
 
 	resultSet := make(map[int32]bool)
 
-	// hyphens and single quotes between words
 	dashTokens := t.Encode(" -")
 	if len(dashTokens) > 0 {
 		resultSet[dashTokens[0]] = true
@@ -249,6 +258,7 @@ func (t *tokenizer) NonSpeechTokens() []int32 {
 		result = append(result, id)
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i] < result[j] })
+	t.nonSpeechTokens = result
 	return result
 }
 
@@ -290,9 +300,8 @@ func (t *tokenizer) SuppressedTokens(suppress []int32) []int32 {
 
 // segmentSplitResult holds the output of SplitSegmentsByTimestamps.
 type segmentSplitResult struct {
-	segments              []rawSegment
-	seek                  int
-	singleTimestampEnding bool
+	segments []rawSegment
+	seek     int
 }
 
 // SplitSegmentsByTimestamps parses timestamp tokens to determine segment boundaries
@@ -370,9 +379,8 @@ func (t *tokenizer) SplitSegmentsByTimestamps(
 	}
 
 	return segmentSplitResult{
-		segments:              segments,
-		seek:                  seek,
-		singleTimestampEnding: singleTimestampEnding,
+		segments: segments,
+		seek:     seek,
 	}
 }
 

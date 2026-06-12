@@ -280,6 +280,87 @@ ct2_detect_result ct2_detect_language(
     }
 }
 
+ct2_align_result ct2_align(
+    ct2_model* m,
+    ct2_encoder_output* encoder_output,
+    const int32_t* start_sequence, size_t start_sequence_count,
+    const int32_t* text_tokens, size_t text_tokens_count,
+    size_t num_frames,
+    int median_filter_width) {
+    ct2_align_result out{};
+
+    if (m == nullptr || m->whisper == nullptr) {
+        out.error = copy_string("model is null");
+        return out;
+    }
+    if (encoder_output == nullptr) {
+        out.error = copy_string("encoder output is required");
+        return out;
+    }
+    if (text_tokens == nullptr || text_tokens_count == 0) {
+        out.error = copy_string("text tokens are required");
+        return out;
+    }
+
+    try {
+        std::vector<int> start_seq(start_sequence_count);
+        for (size_t i = 0; i < start_sequence_count; ++i) {
+            start_seq[i] = static_cast<int>(start_sequence[i]);
+        }
+
+        std::vector<int> tokens(text_tokens_count);
+        for (size_t i = 0; i < text_tokens_count; ++i) {
+            tokens[i] = static_cast<int>(text_tokens[i]);
+        }
+
+        std::vector<std::vector<int>> token_batches = {tokens};
+        std::vector<size_t> num_frames_vec = {num_frames};
+
+        int filter_width = median_filter_width > 0 ? median_filter_width : 7;
+
+        std::vector<ctranslate2::models::WhisperAlignmentResult> results =
+            m->whisper->align(
+                encoder_output->view,
+                start_seq,
+                token_batches,
+                num_frames_vec,
+                filter_width);
+
+        if (results.empty() || results.front().alignments.empty()) {
+            out.error = copy_string("align returned no results");
+            return out;
+        }
+
+        const auto& alignment = results.front();
+        size_t n_tokens = alignment.alignments.size();
+        size_t n_frames_out = 0;
+        if (n_tokens > 0) {
+            n_frames_out = alignment.alignments.front().size();
+        }
+
+        out.num_tokens = n_tokens;
+        out.num_frames = n_frames_out;
+        out.weights = static_cast<float*>(
+            std::malloc(n_tokens * n_frames_out * sizeof(float)));
+        if (out.weights == nullptr) {
+            out.error = copy_string("failed to allocate alignment weights");
+            return out;
+        }
+
+        for (size_t t = 0; t < n_tokens; ++t) {
+            const auto& row = alignment.alignments[t];
+            for (size_t f = 0; f < n_frames_out; ++f) {
+                out.weights[t * n_frames_out + f] = row[f];
+            }
+        }
+
+        return out;
+    } catch (const std::exception& e) {
+        out.error = copy_string(e.what());
+        return out;
+    }
+}
+
 void ct2_generate_result_free(ct2_generate_result* r) {
     if (r == nullptr) {
         return;
@@ -300,6 +381,18 @@ void ct2_detect_result_free(ct2_detect_result* r) {
     r->language = nullptr;
     r->error = nullptr;
     r->probability = 0;
+}
+
+void ct2_align_result_free(ct2_align_result* r) {
+    if (r == nullptr) {
+        return;
+    }
+    std::free(r->weights);
+    std::free(r->error);
+    r->weights = nullptr;
+    r->error = nullptr;
+    r->num_tokens = 0;
+    r->num_frames = 0;
 }
 
 }  // extern "C"

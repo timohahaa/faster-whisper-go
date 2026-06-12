@@ -13,7 +13,8 @@ const (
 
 	framesPerSecond = whisperSampleRate / whisperHopLength // 100
 	timePerFrame    = float64(whisperHopLength) / float64(whisperSampleRate)
-	inputStride     = 2
+	// inputStride is the encoder's temporal downsampling factor (conv layers reduce frames by 2x).
+	inputStride = 2
 )
 
 // hzToMel converts frequency in Hz to the mel scale using the HTK formula
