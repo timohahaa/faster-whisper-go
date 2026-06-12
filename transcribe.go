@@ -1,25 +1,25 @@
 package whisper
 
 import (
+	"bytes"
+	"compress/flate"
 	"context"
 	"errors"
+	"math"
 	"strings"
 	"time"
 
 	"github.com/timohahaa/faster-whisper-go/internal/ct2bridge"
 )
 
-const maxSamples = whisperSampleRate * whisperChunkLen // 480000
-
 // Transcribe runs speech recognition on PCM audio samples (16kHz, mono, float32).
-// Output text is in the original spoken language.
-// For audio longer than 30 seconds, only the first 30 seconds are processed.
+// Handles audio of any length via an internal sliding window.
 func (m *Model) Transcribe(ctx context.Context, samples []float32, cfg TranscribeConfig) (*Result, error) {
 	return m.infer(ctx, samples, cfg, tokenTranscribe)
 }
 
 // Translate runs speech recognition and translates the result into English.
-// For audio longer than 30 seconds, only the first 30 seconds are processed.
+// Handles audio of any length via an internal sliding window.
 func (m *Model) Translate(ctx context.Context, samples []float32, cfg TranscribeConfig) (*Result, error) {
 	return m.infer(ctx, samples, cfg, tokenTranslate)
 }
@@ -35,67 +35,132 @@ func (m *Model) infer(ctx context.Context, samples []float32, cfg TranscribeConf
 		return nil, err
 	}
 
-	audio := padOrTrim(samples, maxSamples)
-	mel := computeMelSpectrogram(audio, m.nMels)
+	cfg = applyDefaults(cfg)
+
+	mel, totalFrames := computeMelSpectrogram(samples, m.nMels)
+	contentFrames := totalFrames - 1
+	duration := time.Duration(float64(len(samples)) / whisperSampleRate * float64(time.Second))
 
 	lang := cfg.Language
+	var langProb float32
+	var allLangProbs []LanguageProb
+
 	if lang == "" && m.IsMultilingual() {
-		detected, err := m.bridge.DetectLanguage(mel, m.nMels, whisperNFrames)
+		var err error
+		lang, langProb, allLangProbs, err = m.detectLanguageFromMel(mel, totalFrames, 0)
 		if err != nil {
 			return nil, err
 		}
-		lang = detected.Language
+	} else if lang == "" {
+		lang = "en"
+		langProb = 1.0
+	} else {
+		langProb = 1.0
 	}
 
-	if err := ctx.Err(); err != nil {
-		return nil, err
+	suppressTokens := m.tokenizer.SuppressedTokens(cfg.SuppressTokens)
+
+	seek := 0
+	var allTokens []int32
+	promptResetSince := 0
+	segIdx := 0
+
+	if cfg.InitialPrompt != "" {
+		initialTokens := m.tokenizer.Encode(" " + strings.TrimSpace(cfg.InitialPrompt))
+		allTokens = append(allTokens, initialTokens...)
 	}
 
-	prompt := m.buildPrompt(lang, cfg, taskToken)
+	var segments []Segment
 
-	genOpts := ct2bridge.GenerateOptions{
-		BeamSize:          cfg.BeamSize,
-		BestOf:            cfg.BestOf,
-		Patience:          1.0,
-		LengthPenalty:     1.0,
-		RepetitionPenalty: 1.0,
-		NoRepeatNgramSize: 0,
-		MaxLength:         448,
-		SuppressBlank:     true,
-		ReturnScores:      true,
-	}
+	for seek < contentFrames {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 
-	genResult, err := m.bridge.Generate(mel, m.nMels, whisperNFrames, prompt, genOpts)
-	if err != nil {
-		return nil, err
-	}
+		segmentSize := min(whisperNFrames, contentFrames-seek)
+		segmentDuration := float64(segmentSize) * timePerFrame
+		timeOffset := float64(seek) * timePerFrame
 
-	result := &Result{
-		Language: lang,
-	}
+		window := extractMelWindow(mel, totalFrames, m.nMels, seek, segmentSize)
+		enc, err := m.bridge.Encode(window, m.nMels, whisperNFrames)
+		if err != nil {
+			return nil, err
+		}
 
-	if cfg.Timestamps {
-		segments := m.tokenizer.DecodeSegmentTokens(genResult.SequenceIDs)
-		for _, seg := range segments {
-			result.Segments = append(result.Segments, Segment{
-				Start: time.Duration(seg.start * float64(time.Second)),
-				End:   time.Duration(seg.end * float64(time.Second)),
-				Text:  strings.TrimSpace(seg.text),
+		if cfg.Multilingual && m.IsMultilingual() {
+			detectedLang, _, _, dlErr := m.detectLanguageFromEncoded(enc)
+			if dlErr == nil {
+				lang = detectedLang
+			}
+		}
+
+		previousTokens := allTokens[promptResetSince:]
+		prompt := m.buildPrompt(lang, previousTokens, cfg, taskToken)
+
+		genResult, avgLogProb, temperature, compressionRatio, genErr := m.generateWithFallback(enc, prompt, cfg, suppressTokens)
+		enc.Free()
+		if genErr != nil {
+			return nil, genErr
+		}
+
+		if shouldSkipSegment(genResult, avgLogProb, cfg) {
+			seek += segmentSize
+			continue
+		}
+
+		tokens := genResult.SequenceIDs
+		previousSeek := seek
+
+		split := m.tokenizer.SplitSegmentsByTimestamps(tokens, timeOffset, segmentSize, segmentDuration, seek)
+		seek = split.seek
+
+		for _, seg := range split.segments {
+			text := strings.TrimSpace(m.tokenizer.Decode(seg.tokens))
+			if text == "" || seg.start == seg.end {
+				continue
+			}
+
+			allTokens = append(allTokens, seg.tokens...)
+			segIdx++
+
+			segments = append(segments, Segment{
+				ID:               segIdx,
+				Start:            secToDuration(seg.start),
+				End:              secToDuration(seg.end),
+				Text:             text,
+				Tokens:           seg.tokens,
+				Temperature:      temperature,
+				AvgLogProb:       avgLogProb,
+				CompressionRatio: compressionRatio,
+				NoSpeechProb:     genResult.NoSpeechProb,
 			})
 		}
-		var textBuf strings.Builder
-		for i, seg := range result.Segments {
-			if i > 0 {
-				textBuf.WriteByte(' ')
-			}
-			textBuf.WriteString(seg.Text)
+
+		if !cfg.ConditionOnPreviousText || temperature > cfg.PromptResetOnTemperature {
+			promptResetSince = len(allTokens)
 		}
-		result.Text = textBuf.String()
-	} else {
-		result.Text = strings.TrimSpace(m.tokenizer.Decode(genResult.SequenceIDs))
+
+		_ = previousSeek
 	}
 
-	return result, nil
+	var textBuf strings.Builder
+	for i, seg := range segments {
+		if i > 0 {
+			textBuf.WriteByte(' ')
+		}
+		textBuf.WriteString(seg.Text)
+	}
+
+	return &Result{
+		Text:     textBuf.String(),
+		Segments: segments,
+		Info: TranscriptionInfo{
+			Language:            lang,
+			LanguageProbability: langProb,
+			Duration:            duration,
+			AllLanguageProbs:    allLangProbs,
+		},
+	}, nil
 }
 
 // DetectLanguage identifies the spoken language from the first 30 seconds of audio.
@@ -110,10 +175,17 @@ func (m *Model) DetectLanguage(ctx context.Context, samples []float32) (Language
 		return LanguageDetection{}, err
 	}
 
-	audio := padOrTrim(samples, maxSamples)
-	mel := computeMelSpectrogram(audio, m.nMels)
+	audio := padOrTrim(samples, whisperSampleRate*whisperChunkLen)
+	mel, totalFrames := computeMelSpectrogram(audio, m.nMels)
+	window := extractMelWindow(mel, totalFrames, m.nMels, 0, whisperNFrames)
 
-	result, err := m.bridge.DetectLanguage(mel, m.nMels, whisperNFrames)
+	enc, err := m.bridge.Encode(window, m.nMels, whisperNFrames)
+	if err != nil {
+		return LanguageDetection{}, err
+	}
+	defer enc.Free()
+
+	result, err := m.bridge.DetectLanguage(enc)
 	if err != nil {
 		return LanguageDetection{}, err
 	}
@@ -123,8 +195,50 @@ func (m *Model) DetectLanguage(ctx context.Context, samples []float32) (Language
 	}, nil
 }
 
-func (m *Model) buildPrompt(lang string, cfg TranscribeConfig, taskToken int32) []int32 {
-	prompt := []int32{tokenSOT}
+func (m *Model) detectLanguageFromMel(mel []float32, totalFrames, seekOffset int) (string, float32, []LanguageProb, error) {
+	window := extractMelWindow(mel, totalFrames, m.nMels, seekOffset, whisperNFrames)
+	enc, err := m.bridge.Encode(window, m.nMels, whisperNFrames)
+	if err != nil {
+		return "", 0, nil, err
+	}
+	defer enc.Free()
+
+	return m.detectLanguageFromEncoded(enc)
+}
+
+func (m *Model) detectLanguageFromEncoded(enc *ct2bridge.EncoderOutput) (string, float32, []LanguageProb, error) {
+	result, err := m.bridge.DetectLanguage(enc)
+	if err != nil {
+		return "", 0, nil, err
+	}
+	return result.Language, result.Probability, nil, nil
+}
+
+func (m *Model) buildPrompt(lang string, previousTokens []int32, cfg TranscribeConfig, taskToken int32) []int32 {
+	var prompt []int32
+
+	if len(previousTokens) > 0 || cfg.Hotwords != "" {
+		prompt = append(prompt, tokenSOTprev)
+
+		if cfg.Hotwords != "" {
+			hw := m.tokenizer.Encode(" " + strings.TrimSpace(cfg.Hotwords))
+			maxHW := maxTokenLength / 2
+			if len(hw) >= maxHW {
+				hw = hw[:maxHW-1]
+			}
+			prompt = append(prompt, hw...)
+		}
+
+		if len(previousTokens) > 0 {
+			maxPrev := maxTokenLength/2 - 1
+			if len(previousTokens) > maxPrev {
+				previousTokens = previousTokens[len(previousTokens)-maxPrev:]
+			}
+			prompt = append(prompt, previousTokens...)
+		}
+	}
+
+	prompt = append(prompt, tokenSOT)
 
 	if m.IsMultilingual() && lang != "" {
 		langTok := m.tokenizer.LanguageToken(lang)
@@ -134,11 +248,163 @@ func (m *Model) buildPrompt(lang string, cfg TranscribeConfig, taskToken int32) 
 		prompt = append(prompt, taskToken)
 	}
 
-	if !cfg.Timestamps {
+	if cfg.WithoutTimestamps || !cfg.Timestamps {
 		prompt = append(prompt, tokenNoTimestamps)
 	}
 
 	return prompt
+}
+
+type fallbackResult struct {
+	genResult        ct2bridge.GenerateResult
+	avgLogProb       float32
+	temperature      float32
+	compressionRatio float32
+}
+
+func (m *Model) generateWithFallback(
+	enc *ct2bridge.EncoderOutput,
+	prompt []int32,
+	cfg TranscribeConfig,
+	suppressTokens []int32,
+) (ct2bridge.GenerateResult, float32, float32, float32, error) {
+	var allResults []fallbackResult
+	var belowCRResults []fallbackResult
+
+	maxInitialTSIdx := int(math.Round(float64(cfg.MaxInitialTimestamp) / timePrecision))
+
+	maxLength := maxTokenLength
+	if cfg.MaxNewTokens != nil {
+		maxLength = len(prompt) + *cfg.MaxNewTokens
+		if maxLength > maxTokenLength {
+			maxLength = maxTokenLength
+		}
+	}
+
+	for _, temp := range cfg.Temperature {
+		opts := ct2bridge.GenerateOptions{
+			BeamSize:                 cfg.BeamSize,
+			BestOf:                   cfg.BestOf,
+			Patience:                 1.0,
+			LengthPenalty:            1.0,
+			RepetitionPenalty:        1.0,
+			NoRepeatNgramSize:        0,
+			MaxLength:                maxLength,
+			SuppressBlank:            cfg.SuppressBlank,
+			ReturnScores:             true,
+			SamplingTemperature:      temp,
+			SuppressTokens:          suppressTokens,
+			MaxInitialTimestampIndex: maxInitialTSIdx,
+		}
+
+		genResult, err := m.bridge.Generate(enc, prompt, opts)
+		if err != nil {
+			return ct2bridge.GenerateResult{}, 0, 0, 0, err
+		}
+
+		seqLen := len(genResult.SequenceIDs)
+		var avgLogProb float32
+		if seqLen > 0 {
+			cumLogProb := genResult.Score * float32(seqLen)
+			avgLogProb = cumLogProb / float32(seqLen+1)
+		}
+
+		text := m.tokenizer.Decode(genResult.SequenceIDs)
+		compressionRatio := getCompressionRatio(text)
+
+		fr := fallbackResult{
+			genResult:        genResult,
+			avgLogProb:       avgLogProb,
+			temperature:      temp,
+			compressionRatio: compressionRatio,
+		}
+		allResults = append(allResults, fr)
+
+		needsFallback := false
+
+		if cfg.CompressionRatioThreshold > 0 && compressionRatio > cfg.CompressionRatioThreshold {
+			needsFallback = true
+		} else {
+			belowCRResults = append(belowCRResults, fr)
+		}
+
+		if cfg.LogProbThreshold != 0 && avgLogProb < cfg.LogProbThreshold {
+			needsFallback = true
+		}
+
+		if cfg.NoSpeechThreshold > 0 &&
+			genResult.NoSpeechProb > cfg.NoSpeechThreshold &&
+			cfg.LogProbThreshold != 0 &&
+			avgLogProb < cfg.LogProbThreshold {
+			needsFallback = false
+		}
+
+		if !needsFallback {
+			return genResult, avgLogProb, temp, compressionRatio, nil
+		}
+	}
+
+	candidates := belowCRResults
+	if len(candidates) == 0 {
+		candidates = allResults
+	}
+	best := candidates[0]
+	for _, c := range candidates[1:] {
+		if c.avgLogProb > best.avgLogProb {
+			best = c
+		}
+	}
+
+	return best.genResult, best.avgLogProb, cfg.Temperature[len(cfg.Temperature)-1], best.compressionRatio, nil
+}
+
+func shouldSkipSegment(genResult ct2bridge.GenerateResult, avgLogProb float32, cfg TranscribeConfig) bool {
+	if cfg.NoSpeechThreshold <= 0 {
+		return false
+	}
+	shouldSkip := genResult.NoSpeechProb > cfg.NoSpeechThreshold
+	if cfg.LogProbThreshold != 0 && avgLogProb > cfg.LogProbThreshold {
+		shouldSkip = false
+	}
+	return shouldSkip
+}
+
+func getCompressionRatio(text string) float32 {
+	raw := []byte(text)
+	if len(raw) == 0 {
+		return 0
+	}
+	var buf bytes.Buffer
+	w, err := flate.NewWriter(&buf, flate.DefaultCompression)
+	if err != nil {
+		return 0
+	}
+	w.Write(raw)
+	w.Close()
+	compressed := buf.Len()
+	if compressed == 0 {
+		return 0
+	}
+	return float32(len(raw)) / float32(compressed)
+}
+
+func applyDefaults(cfg TranscribeConfig) TranscribeConfig {
+	if cfg.BeamSize <= 0 {
+		cfg.BeamSize = 5
+	}
+	if cfg.BestOf <= 0 {
+		cfg.BestOf = 5
+	}
+	if len(cfg.Temperature) == 0 {
+		cfg.Temperature = []float32{0, 0.2, 0.4, 0.6, 0.8, 1.0}
+	}
+	if cfg.PromptResetOnTemperature == 0 {
+		cfg.PromptResetOnTemperature = 0.5
+	}
+	if cfg.MaxInitialTimestamp == 0 {
+		cfg.MaxInitialTimestamp = 1.0
+	}
+	return cfg
 }
 
 func padOrTrim(samples []float32, length int) []float32 {
@@ -148,4 +414,8 @@ func padOrTrim(samples []float32, length int) []float32 {
 	out := make([]float32, length)
 	copy(out, samples)
 	return out
+}
+
+func secToDuration(sec float64) time.Duration {
+	return time.Duration(sec * float64(time.Second))
 }

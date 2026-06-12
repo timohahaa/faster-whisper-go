@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"unicode/utf8"
 )
@@ -23,14 +24,24 @@ const (
 const (
 	tokenTranslate  int32 = 50358
 	tokenTranscribe int32 = 50359
+	tokenSOTlm      int32 = 50360
 )
 
-// tokenizer decodes Whisper token IDs to text.
+const maxTokenLength = 448
+
+// tokenizer decodes/encodes Whisper token IDs.
 type tokenizer struct {
 	idToToken       map[int32]string
+	tokenToID       map[string]int32
 	langToToken     map[string]int32
-	byteDecoder     [512]byte     // rune → byte; indexed by rune value, valid for runes < 512
-	byteDecoderHigh map[rune]byte // fallback for runes ≥ 512 (shouldn't happen in GPT-2 but just in case)
+	merges          []bpeMerge
+	byteDecoder     [512]byte
+	byteDecoderHigh map[rune]byte
+	byteEncoder     map[byte]rune
+}
+
+type bpeMerge struct {
+	a, b string
 }
 
 // loadTokenizer parses tokenizer.json from a model directory.
@@ -43,7 +54,8 @@ func loadTokenizer(modelDir string) (*tokenizer, error) {
 
 	var raw struct {
 		Model struct {
-			Vocab map[string]int32 `json:"vocab"`
+			Vocab  map[string]int32 `json:"vocab"`
+			Merges []string         `json:"merges"`
 		} `json:"model"`
 		AddedTokens []struct {
 			ID      int32  `json:"id"`
@@ -56,18 +68,30 @@ func loadTokenizer(modelDir string) (*tokenizer, error) {
 
 	t := &tokenizer{
 		idToToken:   make(map[int32]string, len(raw.Model.Vocab)+len(raw.AddedTokens)),
+		tokenToID:   make(map[string]int32, len(raw.Model.Vocab)+len(raw.AddedTokens)),
 		langToToken: make(map[string]int32),
 	}
 	buildByteDecoderInto(t)
+	t.byteEncoder = buildByteEncoder(t)
 
 	for token, id := range raw.Model.Vocab {
 		t.idToToken[id] = token
+		t.tokenToID[token] = id
 	}
 	for _, added := range raw.AddedTokens {
 		t.idToToken[added.ID] = added.Content
+		t.tokenToID[added.Content] = added.ID
 		if isLangToken(added.Content) {
-			lang := added.Content[2 : len(added.Content)-2] // strip <| and |>
+			lang := added.Content[2 : len(added.Content)-2]
 			t.langToToken[lang] = added.ID
+		}
+	}
+
+	t.merges = make([]bpeMerge, 0, len(raw.Model.Merges))
+	for _, m := range raw.Model.Merges {
+		parts := strings.SplitN(m, " ", 2)
+		if len(parts) == 2 {
+			t.merges = append(t.merges, bpeMerge{a: parts[0], b: parts[1]})
 		}
 	}
 
@@ -90,45 +114,269 @@ func (t *tokenizer) Decode(ids []int32) string {
 	return buf.String()
 }
 
-// DecodeSegmentTokens extracts text segments with timestamp boundaries.
-// It groups tokens between consecutive timestamp token pairs.
-func (t *tokenizer) DecodeSegmentTokens(ids []int32) []rawSegment {
-	var segments []rawSegment
-	var current rawSegment
-	var textTokens []int32
-	inSegment := false
+// Encode converts text into token IDs using GPT-2 BPE.
+func (t *tokenizer) Encode(text string) []int32 {
+	if text == "" {
+		return nil
+	}
 
-	for _, id := range ids {
-		if id == tokenEOT {
-			break
-		}
-		if id >= tokenTimestampBeg {
-			ts := float64(id-tokenTimestampBeg) * 0.02
-			if !inSegment {
-				current.start = ts
-				inSegment = true
-			} else {
-				current.end = ts
-				current.text = t.Decode(textTokens)
-				segments = append(segments, current)
-				textTokens = textTokens[:0]
-				current = rawSegment{}
-				inSegment = false
-			}
+	bpeText := t.textToBPEString(text)
+
+	words := strings.Split(bpeText, " ")
+	var ids []int32
+	for _, word := range words {
+		if word == "" {
 			continue
 		}
-		if inSegment {
-			textTokens = append(textTokens, id)
+		wordTokens := t.bpeEncode(word)
+		ids = append(ids, wordTokens...)
+	}
+	return ids
+}
+
+// textToBPEString converts raw text to the GPT-2 byte-level BPE representation.
+func (t *tokenizer) textToBPEString(text string) string {
+	var buf strings.Builder
+	for i := 0; i < len(text); i++ {
+		r, ok := t.byteEncoder[text[i]]
+		if ok {
+			buf.WriteRune(r)
+		} else {
+			buf.WriteByte(text[i])
+		}
+	}
+	return buf.String()
+}
+
+// bpeEncode applies BPE merges to a single word (already in BPE byte space).
+func (t *tokenizer) bpeEncode(word string) []int32 {
+	if len(word) == 0 {
+		return nil
+	}
+
+	var symbols []string
+	for _, r := range word {
+		symbols = append(symbols, string(r))
+	}
+
+	mergeRank := make(map[string]int, len(t.merges))
+	for i, m := range t.merges {
+		mergeRank[m.a+" "+m.b] = i
+	}
+
+	for len(symbols) > 1 {
+		bestIdx := -1
+		bestRank := len(t.merges)
+
+		for i := 0; i < len(symbols)-1; i++ {
+			pair := symbols[i] + " " + symbols[i+1]
+			if rank, ok := mergeRank[pair]; ok && rank < bestRank {
+				bestRank = rank
+				bestIdx = i
+			}
+		}
+
+		if bestIdx < 0 {
+			break
+		}
+
+		merged := symbols[bestIdx] + symbols[bestIdx+1]
+		newSymbols := make([]string, 0, len(symbols)-1)
+		newSymbols = append(newSymbols, symbols[:bestIdx]...)
+		newSymbols = append(newSymbols, merged)
+		newSymbols = append(newSymbols, symbols[bestIdx+2:]...)
+		symbols = newSymbols
+	}
+
+	var ids []int32
+	for _, sym := range symbols {
+		if id, ok := t.tokenToID[sym]; ok {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+// NonSpeechTokens returns the standard set of token IDs to suppress
+// to avoid non-speech annotations like ♪♪♪, (SPEAKING FOREIGN LANGUAGE), [DAVID], etc.
+func (t *tokenizer) NonSpeechTokens() []int32 {
+	symbols := []string{
+		`"`, "#", "(", ")", "*", "+", "/", ":", ";", "<", "=", ">", "@",
+		"[", "\\", "]", "^", "_", "`", "{", "|", "}", "~",
+		"\u300c", "\u300d", "\u300e", "\u300f",
+	}
+	multiSymbols := strings.Split(
+		"<< >> <<< >>> -- --- -( -[ (' (\" (( )) ((( ))) [[ ]] {{ }} \u266a\u266a \u266a\u266a\u266a",
+		" ",
+	)
+
+	miscellaneous := "\u2669\u266a\u266b\u266c\u266d\u266e\u266f"
+
+	resultSet := make(map[int32]bool)
+
+	// hyphens and single quotes between words
+	dashTokens := t.Encode(" -")
+	if len(dashTokens) > 0 {
+		resultSet[dashTokens[0]] = true
+	}
+	quoteTokens := t.Encode(" '")
+	if len(quoteTokens) > 0 {
+		resultSet[quoteTokens[0]] = true
+	}
+
+	allSymbols := append(symbols, multiSymbols...)
+	for _, r := range miscellaneous {
+		allSymbols = append(allSymbols, string(r))
+	}
+
+	isMisc := func(s string) bool {
+		return len(s) > 0 && strings.ContainsRune(miscellaneous, []rune(s)[0])
+	}
+
+	for _, sym := range allSymbols {
+		for _, variant := range []string{sym, " " + sym} {
+			tokens := t.Encode(variant)
+			if len(tokens) == 1 || isMisc(sym) {
+				if len(tokens) > 0 {
+					resultSet[tokens[0]] = true
+				}
+			}
 		}
 	}
 
-	if inSegment && len(textTokens) > 0 {
-		current.text = t.Decode(textTokens)
-		segments = append(segments, current)
+	result := make([]int32, 0, len(resultSet))
+	for id := range resultSet {
+		result = append(result, id)
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i] < result[j] })
+	return result
+}
+
+// SuppressedTokens expands the suppress list: -1 becomes the default non-speech set,
+// and always-suppressed special tokens are appended.
+func (t *tokenizer) SuppressedTokens(suppress []int32) []int32 {
+	set := make(map[int32]bool)
+
+	hasDefault := false
+	for _, tok := range suppress {
+		if tok == -1 {
+			hasDefault = true
+		} else if tok >= 0 {
+			set[tok] = true
+		}
 	}
 
-	return segments
+	if hasDefault {
+		for _, tok := range t.NonSpeechTokens() {
+			set[tok] = true
+		}
+	}
+
+	for _, tok := range []int32{
+		tokenTranscribe, tokenTranslate,
+		tokenSOT, tokenSOTprev, tokenSOTlm,
+		tokenNoSpeech,
+	} {
+		set[tok] = true
+	}
+
+	result := make([]int32, 0, len(set))
+	for id := range set {
+		result = append(result, id)
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i] < result[j] })
+	return result
 }
+
+// segmentSplitResult holds the output of SplitSegmentsByTimestamps.
+type segmentSplitResult struct {
+	segments              []rawSegment
+	seek                  int
+	singleTimestampEnding bool
+}
+
+// SplitSegmentsByTimestamps parses timestamp tokens to determine segment boundaries
+// and how far to advance the seek position, matching the Python _split_segments_by_timestamps.
+func (t *tokenizer) SplitSegmentsByTimestamps(
+	tokens []int32,
+	timeOffset float64,
+	segmentSize int,
+	segmentDuration float64,
+	seek int,
+) segmentSplitResult {
+	singleTimestampEnding := len(tokens) >= 2 &&
+		tokens[len(tokens)-2] < tokenTimestampBeg &&
+		tokens[len(tokens)-1] >= tokenTimestampBeg
+
+	var consecutiveTimestamps []int
+	for i := 1; i < len(tokens); i++ {
+		if tokens[i] >= tokenTimestampBeg && tokens[i-1] >= tokenTimestampBeg {
+			consecutiveTimestamps = append(consecutiveTimestamps, i)
+		}
+	}
+
+	var segments []rawSegment
+
+	if len(consecutiveTimestamps) > 0 {
+		slices := make([]int, len(consecutiveTimestamps))
+		copy(slices, consecutiveTimestamps)
+		if singleTimestampEnding {
+			slices = append(slices, len(tokens))
+		}
+
+		lastSlice := 0
+		for _, currentSlice := range slices {
+			slicedTokens := tokens[lastSlice:currentSlice]
+			startPos := slicedTokens[0] - tokenTimestampBeg
+			endPos := slicedTokens[len(slicedTokens)-1] - tokenTimestampBeg
+			startTime := timeOffset + float64(startPos)*timePrecision
+			endTime := timeOffset + float64(endPos)*timePrecision
+
+			segments = append(segments, rawSegment{
+				seek:   seek,
+				start:  startTime,
+				end:    endTime,
+				tokens: copyTokens(slicedTokens),
+			})
+			lastSlice = currentSlice
+		}
+
+		if singleTimestampEnding {
+			seek += segmentSize
+		} else {
+			lastTSPos := tokens[lastSlice-1] - tokenTimestampBeg
+			seek += int(lastTSPos) * inputStride
+		}
+	} else {
+		duration := segmentDuration
+		var timestamps []int32
+		for _, tok := range tokens {
+			if tok >= tokenTimestampBeg {
+				timestamps = append(timestamps, tok)
+			}
+		}
+		if len(timestamps) > 0 && timestamps[len(timestamps)-1] != tokenTimestampBeg {
+			lastTSPos := timestamps[len(timestamps)-1] - tokenTimestampBeg
+			duration = float64(lastTSPos) * timePrecision
+		}
+
+		segments = append(segments, rawSegment{
+			seek:   seek,
+			start:  timeOffset,
+			end:    timeOffset + duration,
+			tokens: copyTokens(tokens),
+		})
+		seek += segmentSize
+	}
+
+	return segmentSplitResult{
+		segments:              segments,
+		seek:                  seek,
+		singleTimestampEnding: singleTimestampEnding,
+	}
+}
+
+const timePrecision = 0.02
 
 // IsTimestamp reports whether a token ID is a timestamp token.
 func (t *tokenizer) IsTimestamp(id int32) bool {
@@ -136,11 +384,8 @@ func (t *tokenizer) IsTimestamp(id int32) bool {
 }
 
 // TimestampValue returns the time in seconds for a timestamp token.
-// Whisper timestamp tokens have a fixed resolution of 20 ms: token
-// (tokenTimestampBeg + N) corresponds to the moment N * 0.02 s.
-// ~1500 tokens cover a full 30-second chunk.
 func (t *tokenizer) TimestampValue(id int32) float64 {
-	return float64(id-tokenTimestampBeg) * 0.02
+	return float64(id-tokenTimestampBeg) * timePrecision
 }
 
 // IsSpecial reports whether a token ID is a special (non-text) token.
@@ -158,26 +403,36 @@ func (t *tokenizer) LanguageToken(lang string) int32 {
 
 // rawSegment is an intermediate segment before converting to public Segment type.
 type rawSegment struct {
-	start float64
-	end   float64
-	text  string
+	seek   int
+	start  float64
+	end    float64
+	text   string
+	tokens []int32
+}
+
+func copyTokens(src []int32) []int32 {
+	out := make([]int32, len(src))
+	copy(out, src)
+	return out
 }
 
 func isLangToken(s string) bool {
-	return len(s) == 6 && s[0] == '<' && s[1] == '|' && s[4] == '|' && s[5] == '>'
+	if len(s) < 6 || len(s) > 7 {
+		return false
+	}
+	if s[0] != '<' || s[1] != '|' || s[len(s)-2] != '|' || s[len(s)-1] != '>' {
+		return false
+	}
+	inner := s[2 : len(s)-2]
+	for _, r := range inner {
+		if r < 'a' || r > 'z' {
+			return false
+		}
+	}
+	return true
 }
 
-// decodeToken converts a GPT-2 BPE token string to its UTF-8 representation,
-// returning a new string. Used only when a standalone string is needed.
-func (t *tokenizer) decodeToken(token string) string {
-	var buf strings.Builder
-	buf.Grow(len(token))
-	t.decodeTokenInto(&buf, token)
-	return buf.String()
-}
-
-// decodeTokenInto writes the decoded bytes of a GPT-2 BPE token directly
-// into the provided Builder, avoiding a separate string allocation.
+// decodeTokenInto writes the decoded bytes of a GPT-2 BPE token directly into the provided Builder.
 func (t *tokenizer) decodeTokenInto(buf *strings.Builder, token string) {
 	for _, r := range token {
 		if int(r) < len(t.byteDecoder) {
@@ -195,6 +450,21 @@ func (t *tokenizer) decodeTokenInto(buf *strings.Builder, token string) {
 			buf.Write(tmp[:n])
 		}
 	}
+}
+
+// buildByteEncoder creates the forward mapping byte -> rune for BPE encoding.
+func buildByteEncoder(t *tokenizer) map[byte]rune {
+	enc := make(map[byte]rune, 256)
+	for i := range 512 {
+		b := t.byteDecoder[i]
+		if b != 0 || i == 0 {
+			enc[b] = rune(i)
+		}
+	}
+	for r, b := range t.byteDecoderHigh {
+		enc[b] = r
+	}
+	return enc
 }
 
 // buildByteDecoder builds a byte decoder and returns it as a map (for tests).
@@ -222,9 +492,6 @@ func buildByteDecoder() map[rune]byte {
 // and '®'-'ÿ') map to the same Unicode codepoint (identity). The remaining
 // 68 bytes (space, tab, newline, DEL, other control chars) are assigned to
 // codepoints starting at U+0100 (Ā, ā, Ă, …).
-//
-// byteDecoder is the reverse table: given a Unicode rune from a BPE token
-// string, it returns the original byte value.
 func buildByteDecoderInto(t *tokenizer) {
 	var isSafe [256]bool
 
@@ -241,7 +508,6 @@ func buildByteDecoderInto(t *tokenizer) {
 		t.byteDecoder[i] = byte(i)
 	}
 
-	// Remaining bytes get mapped to U+0100..U+0143.
 	t.byteDecoderHigh = make(map[rune]byte)
 	n := 0
 	for i := range 256 {

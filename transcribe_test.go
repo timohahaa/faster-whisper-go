@@ -43,3 +43,50 @@ func TestPadOrTrim(t *testing.T) {
 		}
 	})
 }
+
+func TestApplyDefaults(t *testing.T) {
+	cfg := TranscribeConfig{}
+	cfg = applyDefaults(cfg)
+
+	if cfg.BeamSize != 5 {
+		t.Errorf("BeamSize: got %d, want 5", cfg.BeamSize)
+	}
+	if cfg.BestOf != 5 {
+		t.Errorf("BestOf: got %d, want 5", cfg.BestOf)
+	}
+	if len(cfg.Temperature) != 6 {
+		t.Errorf("Temperature: got %d entries, want 6", len(cfg.Temperature))
+	}
+	if cfg.PromptResetOnTemperature != 0.5 {
+		t.Errorf("PromptResetOnTemperature: got %f, want 0.5", cfg.PromptResetOnTemperature)
+	}
+	if cfg.MaxInitialTimestamp != 1.0 {
+		t.Errorf("MaxInitialTimestamp: got %f, want 1.0", cfg.MaxInitialTimestamp)
+	}
+}
+
+func TestApplyDefaultsPreserves(t *testing.T) {
+	cfg := TranscribeConfig{
+		BeamSize:    3,
+		BestOf:      2,
+		Temperature: []float32{0.0},
+	}
+	cfg = applyDefaults(cfg)
+
+	if cfg.BeamSize != 3 {
+		t.Errorf("BeamSize should be preserved: got %d", cfg.BeamSize)
+	}
+	if cfg.BestOf != 2 {
+		t.Errorf("BestOf should be preserved: got %d", cfg.BestOf)
+	}
+	if len(cfg.Temperature) != 1 {
+		t.Errorf("Temperature should be preserved: got %d entries", len(cfg.Temperature))
+	}
+}
+
+func TestSecToDuration(t *testing.T) {
+	d := secToDuration(1.5)
+	if d.Seconds() != 1.5 {
+		t.Errorf("secToDuration(1.5) = %v, want 1.5s", d)
+	}
+}

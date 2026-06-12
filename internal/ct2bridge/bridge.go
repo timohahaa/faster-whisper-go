@@ -61,17 +61,57 @@ func (m *Model) NMels() int {
 	return int(C.ct2_model_n_mels(m.ptr))
 }
 
+// EncoderOutput holds the encoder output from a single encode pass.
+// Must be freed after use.
+type EncoderOutput struct {
+	ptr *C.ct2_encoder_output
+}
+
+// Free releases the encoder output resources.
+func (e *EncoderOutput) Free() {
+	if e == nil || e.ptr == nil {
+		return
+	}
+	C.ct2_encoder_output_free(e.ptr)
+	e.ptr = nil
+}
+
+// Encode runs the Whisper encoder on a mel spectrogram window.
+func (m *Model) Encode(mel []float32, nMels, nFrames int) (*EncoderOutput, error) {
+	if m == nil || m.ptr == nil {
+		return nil, errors.New("model is closed")
+	}
+	if len(mel) == 0 {
+		return nil, errors.New("mel spectrogram is required")
+	}
+
+	ptr := C.ct2_encode(
+		m.ptr,
+		(*C.float)(unsafe.Pointer(&mel[0])),
+		C.size_t(nMels),
+		C.size_t(nFrames),
+	)
+	if ptr == nil {
+		return nil, errors.New(C.GoString(C.ct2_last_error()))
+	}
+
+	return &EncoderOutput{ptr: ptr}, nil
+}
+
 // GenerateOptions controls Whisper decoding through the C bridge.
 type GenerateOptions struct {
-	BeamSize          int
-	BestOf            int
-	Patience          float32
-	LengthPenalty     float32
-	RepetitionPenalty float32
-	NoRepeatNgramSize int
-	MaxLength         int
-	SuppressBlank     bool
-	ReturnScores      bool
+	BeamSize                 int
+	BestOf                   int
+	Patience                 float32
+	LengthPenalty            float32
+	RepetitionPenalty        float32
+	NoRepeatNgramSize        int
+	MaxLength                int
+	SuppressBlank            bool
+	ReturnScores             bool
+	SamplingTemperature      float32
+	SuppressTokens           []int32
+	MaxInitialTimestampIndex int
 }
 
 // GenerateResult holds token IDs returned by the C bridge.
@@ -81,13 +121,13 @@ type GenerateResult struct {
 	NoSpeechProb float32
 }
 
-// Generate runs Whisper decoding on a mel spectrogram and prompt tokens.
-func (m *Model) Generate(mel []float32, nMels, nFrames int, prompt []int32, opts GenerateOptions) (GenerateResult, error) {
+// Generate runs Whisper decoding on a previously computed encoder output.
+func (m *Model) Generate(enc *EncoderOutput, prompt []int32, opts GenerateOptions) (GenerateResult, error) {
 	if m == nil || m.ptr == nil {
 		return GenerateResult{}, errors.New("model is closed")
 	}
-	if len(mel) == 0 {
-		return GenerateResult{}, errors.New("mel spectrogram is required")
+	if enc == nil || enc.ptr == nil {
+		return GenerateResult{}, errors.New("encoder output is required")
 	}
 	if len(prompt) == 0 {
 		return GenerateResult{}, errors.New("prompt tokens are required")
@@ -95,11 +135,15 @@ func (m *Model) Generate(mel []float32, nMels, nFrames int, prompt []int32, opts
 
 	promptPtr := (*C.int32_t)(unsafe.Pointer(&prompt[0]))
 
+	var suppressPtr *C.int32_t
+	suppressCount := len(opts.SuppressTokens)
+	if suppressCount > 0 {
+		suppressPtr = (*C.int32_t)(unsafe.Pointer(&opts.SuppressTokens[0]))
+	}
+
 	result := C.ct2_generate(
 		m.ptr,
-		(*C.float)(unsafe.Pointer(&mel[0])),
-		C.size_t(nMels),
-		C.size_t(nFrames),
+		enc.ptr,
 		promptPtr,
 		C.size_t(len(prompt)),
 		C.int(opts.BeamSize),
@@ -111,6 +155,10 @@ func (m *Model) Generate(mel []float32, nMels, nFrames int, prompt []int32, opts
 		C.int(opts.MaxLength),
 		C.bool(opts.SuppressBlank),
 		C.bool(opts.ReturnScores),
+		C.float(opts.SamplingTemperature),
+		suppressPtr,
+		C.size_t(suppressCount),
+		C.int(opts.MaxInitialTimestampIndex),
 	)
 	defer C.ct2_generate_result_free(&result)
 
@@ -134,21 +182,16 @@ type DetectLanguageResult struct {
 	Probability float32
 }
 
-// DetectLanguage detects the most likely spoken language from a mel spectrogram.
-func (m *Model) DetectLanguage(mel []float32, nMels, nFrames int) (DetectLanguageResult, error) {
+// DetectLanguage detects the most likely spoken language from encoder output.
+func (m *Model) DetectLanguage(enc *EncoderOutput) (DetectLanguageResult, error) {
 	if m == nil || m.ptr == nil {
 		return DetectLanguageResult{}, errors.New("model is closed")
 	}
-	if len(mel) == 0 {
-		return DetectLanguageResult{}, errors.New("mel spectrogram is required")
+	if enc == nil || enc.ptr == nil {
+		return DetectLanguageResult{}, errors.New("encoder output is required")
 	}
 
-	result := C.ct2_detect_language(
-		m.ptr,
-		(*C.float)(unsafe.Pointer(&mel[0])),
-		C.size_t(nMels),
-		C.size_t(nFrames),
-	)
+	result := C.ct2_detect_language(m.ptr, enc.ptr)
 	defer C.ct2_detect_result_free(&result)
 
 	if result.error != nil {

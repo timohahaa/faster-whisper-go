@@ -60,11 +60,15 @@ func TestComputeMelSpectrogram(t *testing.T) {
 	}
 
 	nMels := 80
-	mel := computeMelSpectrogram(samples, nMels)
+	mel, totalFrames := computeMelSpectrogram(samples, nMels)
 
-	expectedLen := nMels * whisperNFrames
+	expectedLen := nMels * totalFrames
 	if len(mel) != expectedLen {
-		t.Fatalf("mel spectrogram length: got %d, want %d", len(mel), expectedLen)
+		t.Fatalf("mel spectrogram length: got %d, want %d (nMels=%d, frames=%d)", len(mel), expectedLen, nMels, totalFrames)
+	}
+
+	if totalFrames <= 0 {
+		t.Fatalf("expected positive frame count, got %d", totalFrames)
 	}
 
 	for i, v := range mel {
@@ -73,6 +77,87 @@ func TestComputeMelSpectrogram(t *testing.T) {
 			break
 		}
 	}
+}
+
+func TestComputeMelSpectrogram30s(t *testing.T) {
+	nSamples := whisperSampleRate * whisperChunkLen
+	samples := make([]float32, nSamples)
+	for i := range samples {
+		samples[i] = float32(math.Sin(2 * math.Pi * 440 * float64(i) / float64(whisperSampleRate)))
+	}
+
+	nMels := 80
+	mel, totalFrames := computeMelSpectrogram(samples, nMels)
+
+	if totalFrames < whisperNFrames {
+		t.Errorf("30s audio should produce at least %d frames, got %d", whisperNFrames, totalFrames)
+	}
+
+	if len(mel) != nMels*totalFrames {
+		t.Fatalf("mel length mismatch: got %d, want %d", len(mel), nMels*totalFrames)
+	}
+}
+
+func TestExtractMelWindow(t *testing.T) {
+	nMels := 2
+	totalFrames := 10
+	mel := make([]float32, nMels*totalFrames)
+	for bin := range nMels {
+		for f := range totalFrames {
+			mel[bin*totalFrames+f] = float32(bin*100 + f)
+		}
+	}
+
+	t.Run("FullWindow", func(t *testing.T) {
+		window := extractMelWindow(mel, totalFrames, nMels, 0, 5)
+		if len(window) != nMels*whisperNFrames {
+			t.Fatalf("window length: got %d, want %d", len(window), nMels*whisperNFrames)
+		}
+		for bin := range nMels {
+			for f := range 5 {
+				got := window[bin*whisperNFrames+f]
+				want := float32(bin*100 + f)
+				if got != want {
+					t.Errorf("window[bin=%d, frame=%d] = %f, want %f", bin, f, got, want)
+				}
+			}
+			for f := 5; f < whisperNFrames; f++ {
+				if window[bin*whisperNFrames+f] != 0 {
+					t.Errorf("window[bin=%d, frame=%d] = %f, want 0 (zero-pad)", bin, f, window[bin*whisperNFrames+f])
+					break
+				}
+			}
+		}
+	})
+
+	t.Run("WithSeekOffset", func(t *testing.T) {
+		window := extractMelWindow(mel, totalFrames, nMels, 3, 4)
+		for bin := range nMels {
+			for f := range 4 {
+				got := window[bin*whisperNFrames+f]
+				want := float32(bin*100 + 3 + f)
+				if got != want {
+					t.Errorf("window[bin=%d, frame=%d] = %f, want %f", bin, f, got, want)
+				}
+			}
+		}
+	})
+
+	t.Run("ClampToEnd", func(t *testing.T) {
+		window := extractMelWindow(mel, totalFrames, nMels, 8, 5)
+		for bin := range nMels {
+			for f := range 2 {
+				got := window[bin*whisperNFrames+f]
+				want := float32(bin*100 + 8 + f)
+				if got != want {
+					t.Errorf("window[bin=%d, frame=%d] = %f, want %f", bin, f, got, want)
+				}
+			}
+			if window[bin*whisperNFrames+2] != 0 {
+				t.Errorf("expected zero-pad at frame 2, got %f", window[bin*whisperNFrames+2])
+			}
+		}
+	})
 }
 
 func BenchmarkComputeMelSpectrogram(b *testing.B) {

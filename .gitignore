@@ -17,4 +17,4 @@
 *.swo
 .DS_Store
 GO_WHISPER_CT2_DESIGN.md
-tmp-build/
+tmp/
