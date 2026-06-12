@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"unicode/utf8"
 )
@@ -28,9 +27,10 @@ const (
 
 // tokenizer decodes Whisper token IDs to text.
 type tokenizer struct {
-	idToToken   map[int32]string
-	langToToken map[string]int32
-	byteDecoder map[rune]byte
+	idToToken       map[int32]string
+	langToToken     map[string]int32
+	byteDecoder     [512]byte     // rune → byte; indexed by rune value, valid for runes < 512
+	byteDecoderHigh map[rune]byte // fallback for runes ≥ 512 (shouldn't happen in GPT-2 but just in case)
 }
 
 // loadTokenizer parses tokenizer.json from a model directory.
@@ -57,8 +57,8 @@ func loadTokenizer(modelDir string) (*tokenizer, error) {
 	t := &tokenizer{
 		idToToken:   make(map[int32]string, len(raw.Model.Vocab)+len(raw.AddedTokens)),
 		langToToken: make(map[string]int32),
-		byteDecoder: buildByteDecoder(),
 	}
+	buildByteDecoderInto(t)
 
 	for token, id := range raw.Model.Vocab {
 		t.idToToken[id] = token
@@ -78,14 +78,14 @@ func loadTokenizer(modelDir string) (*tokenizer, error) {
 func (t *tokenizer) Decode(ids []int32) string {
 	var buf strings.Builder
 	for _, id := range ids {
-		if t.IsSpecial(id) {
+		if id >= tokenEOT {
 			continue
 		}
 		tok, ok := t.idToToken[id]
 		if !ok {
 			continue
 		}
-		buf.WriteString(t.decodeToken(tok))
+		t.decodeTokenInto(&buf, tok)
 	}
 	return buf.String()
 }
@@ -102,8 +102,8 @@ func (t *tokenizer) DecodeSegmentTokens(ids []int32) []rawSegment {
 		if id == tokenEOT {
 			break
 		}
-		if t.IsTimestamp(id) {
-			ts := t.TimestampValue(id)
+		if id >= tokenTimestampBeg {
+			ts := float64(id-tokenTimestampBeg) * 0.02
 			if !inSegment {
 				current.start = ts
 				inSegment = true
@@ -122,7 +122,6 @@ func (t *tokenizer) DecodeSegmentTokens(ids []int32) []rawSegment {
 		}
 	}
 
-	// If we have leftover text without closing timestamp, emit it anyway
 	if inSegment && len(textTokens) > 0 {
 		current.text = t.Decode(textTokens)
 		segments = append(segments, current)
@@ -165,25 +164,56 @@ type rawSegment struct {
 }
 
 func isLangToken(s string) bool {
-	return strings.HasPrefix(s, "<|") && strings.HasSuffix(s, "|>") &&
-		len(s) == 6 // <|xx|> — 2-char language code
+	return len(s) == 6 && s[0] == '<' && s[1] == '|' && s[4] == '|' && s[5] == '>'
 }
 
-// decodeToken converts a GPT-2 BPE token string to its UTF-8 representation.
-// GPT-2 uses a byte-level encoding where certain unicode chars map to bytes.
+// decodeToken converts a GPT-2 BPE token string to its UTF-8 representation,
+// returning a new string. Used only when a standalone string is needed.
 func (t *tokenizer) decodeToken(token string) string {
-	var buf []byte
+	var buf strings.Builder
+	buf.Grow(len(token))
+	t.decodeTokenInto(&buf, token)
+	return buf.String()
+}
+
+// decodeTokenInto writes the decoded bytes of a GPT-2 BPE token directly
+// into the provided Builder, avoiding a separate string allocation.
+func (t *tokenizer) decodeTokenInto(buf *strings.Builder, token string) {
 	for _, r := range token {
-		if b, ok := t.byteDecoder[r]; ok {
-			buf = append(buf, b)
+		if int(r) < len(t.byteDecoder) {
+			b := t.byteDecoder[r]
+			if b != 0 || r == 0 {
+				buf.WriteByte(b)
+				continue
+			}
+		}
+		if b, ok := t.byteDecoderHigh[r]; ok {
+			buf.WriteByte(b)
 		} else {
-			buf = utf8.AppendRune(buf, r)
+			var tmp [utf8.UTFMax]byte
+			n := utf8.EncodeRune(tmp[:], r)
+			buf.Write(tmp[:n])
 		}
 	}
-	return string(buf)
 }
 
-// buildByteDecoder builds the inverse of GPT-2's bytes_to_unicode mapping.
+// buildByteDecoder builds a byte decoder and returns it as a map (for tests).
+func buildByteDecoder() map[rune]byte {
+	t := &tokenizer{}
+	buildByteDecoderInto(t)
+	result := make(map[rune]byte, 256)
+	for i, b := range t.byteDecoder {
+		if b != 0 || i == 0 {
+			result[rune(i)] = b
+		}
+	}
+	for r, b := range t.byteDecoderHigh {
+		result[r] = b
+	}
+	return result
+}
+
+// buildByteDecoderInto populates the tokenizer's byte decoder fields.
 //
 // GPT-2 BPE represents every byte (0-255) as a printable Unicode character so
 // the vocabulary never contains invisible control chars or whitespace.
@@ -195,37 +225,34 @@ func (t *tokenizer) decodeToken(token string) string {
 //
 // byteDecoder is the reverse table: given a Unicode rune from a BPE token
 // string, it returns the original byte value.
-func buildByteDecoder() map[rune]byte {
-	bs := make([]int, 0, 256)
-	cs := make([]int, 0, 256)
+func buildByteDecoderInto(t *tokenizer) {
+	var isSafe [256]bool
 
-	// Safe byte ranges that map to themselves (identity mapping).
 	for i := int('!'); i <= int('~'); i++ {
-		bs = append(bs, i)
-		cs = append(cs, i)
+		isSafe[i] = true
+		t.byteDecoder[i] = byte(i)
 	}
 	for i := int('¡'); i <= int('¬'); i++ {
-		bs = append(bs, i)
-		cs = append(cs, i)
+		isSafe[i] = true
+		t.byteDecoder[i] = byte(i)
 	}
 	for i := int('®'); i <= int('ÿ'); i++ {
-		bs = append(bs, i)
-		cs = append(cs, i)
+		isSafe[i] = true
+		t.byteDecoder[i] = byte(i)
 	}
 
-	// Remaining bytes (control chars, space, DEL, etc.) are mapped to U+0100..U+0143.
+	// Remaining bytes get mapped to U+0100..U+0143.
+	t.byteDecoderHigh = make(map[rune]byte)
 	n := 0
 	for i := range 256 {
-		if !slices.Contains(bs, i) {
-			bs = append(bs, i)
-			cs = append(cs, 256+n)
+		if !isSafe[i] {
+			r := rune(256 + n)
+			if int(r) < len(t.byteDecoder) {
+				t.byteDecoder[r] = byte(i)
+			} else {
+				t.byteDecoderHigh[r] = byte(i)
+			}
 			n++
 		}
 	}
-
-	decoder := make(map[rune]byte, 256)
-	for i, c := range cs {
-		decoder[rune(c)] = byte(bs[i])
-	}
-	return decoder
 }

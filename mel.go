@@ -26,51 +26,51 @@ func melToHz(mel float64) float64 {
 }
 
 // computeMelFilterbank builds a bank of nMels triangular band-pass filters
-// of shape [nMels][nFFT/2+1]. Center frequencies are evenly spaced on the mel
-// scale. Each filter has a rising slope from its left neighbor's center to its
-// own center, and a falling slope from its center to its right neighbor's center.
-func computeMelFilterbank(nMels, nFFT, sampleRate int) [][]float32 {
+// stored as a flat slice of length nMels*(nFFT/2+1), row-major (mel bin major).
+// Center frequencies are evenly spaced on the mel scale.
+func computeMelFilterbank(nMels, nFFT, sampleRate int) []float32 {
 	freqBins := nFFT/2 + 1
 	melMin := hzToMel(0)
 	melMax := hzToMel(float64(sampleRate) / 2.0)
 
-	melPoints := make([]float64, nMels+2)
-	for i := range melPoints {
-		melPoints[i] = melMin + float64(i)*(melMax-melMin)/float64(nMels+1)
+	nPoints := nMels + 2
+	melPoints := make([]float64, nPoints)
+	hzPoints := make([]float64, nPoints)
+	binPoints := make([]float64, nPoints)
+
+	melStep := (melMax - melMin) / float64(nMels+1)
+	nFFTf := float64(nFFT)
+	srf := float64(sampleRate)
+	for i := range nPoints {
+		m := melMin + float64(i)*melStep
+		melPoints[i] = m
+		hz := melToHz(m)
+		hzPoints[i] = hz
+		binPoints[i] = hz * nFFTf / srf
 	}
 
-	hzPoints := make([]float64, len(melPoints))
-	for i, m := range melPoints {
-		hzPoints[i] = melToHz(m)
-	}
-
-	binPoints := make([]float64, len(hzPoints))
-	for i, hz := range hzPoints {
-		binPoints[i] = hz * float64(nFFT) / float64(sampleRate)
-	}
-
-	filters := make([][]float32, nMels)
+	filters := make([]float32, nMels*freqBins)
 	for i := range nMels {
-		filters[i] = make([]float32, freqBins)
 		left := binPoints[i]
 		center := binPoints[i+1]
 		right := binPoints[i+2]
+		base := i * freqBins
 
 		for j := range freqBins {
 			freq := float64(j)
 			if freq >= left && freq <= center && center > left {
-				filters[i][j] = float32((freq - left) / (center - left))
+				filters[base+j] = float32((freq - left) / (center - left))
 			} else if freq > center && freq <= right && right > center {
-				filters[i][j] = float32((right - freq) / (right - center))
+				filters[base+j] = float32((right - freq) / (right - center))
 			}
 		}
 
 		// Slaney normalization: scale each triangle by 2/(f_right - f_left) so its
 		// area is constant. This ensures narrow low-frequency bands and wide
 		// high-frequency bands contribute comparable energy values.
-		enorm := 2.0 / (hzPoints[i+2] - hzPoints[i])
+		enorm := float32(2.0 / (hzPoints[i+2] - hzPoints[i]))
 		for j := range freqBins {
-			filters[i][j] *= float32(enorm)
+			filters[base+j] *= enorm
 		}
 	}
 	return filters
@@ -79,60 +79,52 @@ func computeMelFilterbank(nMels, nFFT, sampleRate int) [][]float32 {
 // computeMelSpectrogram computes a log-mel spectrogram matching Whisper's preprocessing.
 // Returns a flat []float32 of length nMels*whisperNFrames, row-major (mel bin major).
 func computeMelSpectrogram(samples []float32, nMels int) []float32 {
-	power := stft(samples, whisperNFFT, whisperHopLength)
-	nFrames := len(power)
-	freqBins := whisperNFFT/2 + 1
+	power, stftFrames := stft(samples, whisperNFFT, whisperHopLength)
+	freqBins := whisperFreqBins
 
 	filters := computeMelFilterbank(nMels, whisperNFFT, whisperSampleRate)
 
-	// Matmul: mel[i][t] = sum_j(filters[i][j] * power[t][j])
-	mel := make([]float64, nMels*nFrames)
+	outFrames := whisperNFrames
+	nFrames := min(stftFrames, outFrames)
+
+	// Fused matmul + log-normalization into the output buffer directly.
+	// mel[i][t] = sum_j(filters[i][j] * power[t][j])
+	out := make([]float32, nMels*outFrames)
+
+	maxVal := math.Inf(-1)
 	for i := range nMels {
+		filterBase := i * freqBins
+		outBase := i * outFrames
 		for t := range nFrames {
 			var sum float64
+			powerBase := t * freqBins
 			for j := range freqBins {
-				sum += float64(filters[i][j]) * power[t][j]
+				sum += float64(filters[filterBase+j]) * power[powerBase+j]
 			}
-			mel[i*nFrames+t] = sum
+			v := math.Log10(math.Max(sum, 1e-10))
+			out[outBase+t] = float32(v)
+			if v > maxVal {
+				maxVal = v
+			}
 		}
 	}
 
-	// Log-normalization matching faster-whisper's Python preprocessing (three steps):
+	// Log-normalization matching faster-whisper's Python preprocessing:
 	//
-	// 1) log10(clamp(x, min=1e-10)) — compress dynamic range via log; clamp
-	//    prevents log(0). Values are now roughly in [-10, 0].
+	// 1) log10(clamp(x, min=1e-10)) — already done above.
 	//
 	// 2) max(x, global_max - 8.0) — floor the dynamic range to ~80 dB below
-	//    the loudest bin (8 orders of magnitude in log10). Anything quieter
-	//    is treated as silence.
+	//    the loudest bin.
 	//
-	// 3) (x + 4.0) / 4.0 — shift and scale into roughly [-1, 1]. Typical
-	//    log10 mel energies lie in [-8, 0]; adding 4 centers the range,
-	//    dividing by 4 normalizes it.
-	maxVal := math.Inf(-1)
-	for i := range mel {
-		v := math.Log10(math.Max(mel[i], 1e-10))
-		mel[i] = v
-		if v > maxVal {
-			maxVal = v
+	// 3) (x + 4.0) / 4.0 — shift and scale into roughly [-1, 1].
+	floor := float32(maxVal - 8.0)
+	for i := range out {
+		v := out[i]
+		if v < floor {
+			v = floor
 		}
+		out[i] = (v + 4.0) / 4.0
 	}
 
-	for i := range mel {
-		mel[i] = math.Max(mel[i], maxVal-8.0)
-		mel[i] = (mel[i] + 4.0) / 4.0
-	}
-
-	// Pad or trim to whisperNFrames
-	outFrames := whisperNFrames
-	out := make([]float32, nMels*outFrames)
-	for i := range nMels {
-		for t := range outFrames {
-			if t < nFrames {
-				out[i*outFrames+t] = float32(mel[i*nFrames+t])
-			}
-			// else remains 0, which after the normalization above acts as silence
-		}
-	}
 	return out
 }
