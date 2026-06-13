@@ -49,7 +49,7 @@ includedir=\${prefix}/include
 Name: CTranslate2
 Description: Fast inference engine for Transformer models
 Version: ${CT2_VERSION#v}
-Libs: -L\${libdir} -lctranslate2
+Libs: -L\${libdir} -Wl,-rpath,\${libdir} -lctranslate2
 Cflags: -I\${includedir}
 PCEOF
 else
@@ -62,7 +62,7 @@ includedir=\${prefix}/include
 Name: CTranslate2
 Description: Fast inference engine for Transformer models
 Version: ${CT2_VERSION#v}
-Libs: -L\${libdir} -lctranslate2
+Libs: -L\${libdir} -Wl,-rpath,\${libdir} -lctranslate2
 Cflags: -I\${includedir}
 PCEOF
 fi
