@@ -35,6 +35,8 @@ func (m *Model) infer(ctx context.Context, samples []float32, cfg TranscribeConf
 		return nil, err
 	}
 
+	cfg.applyDefaults()
+
 	mel, totalFrames := computeMelSpectrogram(samples, m.nMels, m.melFilters)
 	duration := time.Duration(float64(len(samples)) / whisperSampleRate * float64(time.Second))
 
@@ -98,7 +100,7 @@ func (m *Model) infer(ctx context.Context, samples []float32, cfg TranscribeConf
 		segIdx = wr.segIdx
 		segments = append(segments, wr.segments...)
 
-		if !cfg.ConditionOnPreviousText || wr.temperature > cfg.PromptResetOnTemperature {
+		if !*cfg.ConditionOnPreviousText || wr.temperature > *cfg.PromptResetOnTemperature {
 			promptResetSince = len(allTokens)
 		}
 	}
@@ -241,11 +243,11 @@ func (m *Model) processWindow(p processWindowParams) (windowResult, error) {
 		segIdx++
 
 		var words []Word
-		if p.cfg.WordTimestamps {
+		if !p.cfg.DisableTimestamps && p.cfg.WordTimestamps {
 			words, _ = m.extractWordTimestamps(enc, seg.tokens, lang, p.taskToken, p.segmentSize, seg.start)
 		}
 
-		segments = append(segments, Segment{
+		s := Segment{
 			ID:               segIdx,
 			Start:            secToDuration(seg.start),
 			End:              secToDuration(seg.end),
@@ -255,7 +257,12 @@ func (m *Model) processWindow(p processWindowParams) (windowResult, error) {
 			AvgLogProb:       avgLogProb,
 			CompressionRatio: compressionRatio,
 			NoSpeechProb:     genResult.NoSpeechProb,
-		})
+		}
+		if p.cfg.DisableTimestamps {
+			s.Start = 0
+			s.End = 0
+		}
+		segments = append(segments, s)
 	}
 
 	return windowResult{
@@ -302,6 +309,10 @@ func (m *Model) buildPrompt(lang string, previousTokens []int32, cfg TranscribeC
 		prompt = append(prompt, taskToken)
 	}
 
+	if cfg.DisableTimestamps {
+		prompt = append(prompt, tokenNoTimestamps)
+	}
+
 	return prompt
 }
 
@@ -321,7 +332,10 @@ func (m *Model) generateWithFallback(
 	var best *fallbackResult
 	var bestBelowCR *fallbackResult
 
-	maxInitialTSIdx := int(math.Round(float64(cfg.MaxInitialTimestamp) / timePrecision))
+	maxInitialTSIdx := 0
+	if !cfg.DisableTimestamps {
+		maxInitialTSIdx = int(math.Round(float64(*cfg.MaxInitialTimestamp) / timePrecision))
+	}
 
 	maxLength := maxTokenLength
 	if cfg.MaxNewTokens != nil {
@@ -335,12 +349,12 @@ func (m *Model) generateWithFallback(
 		opts := ct2bridge.GenerateOptions{
 			BeamSize:                 cfg.BeamSize,
 			BestOf:                   cfg.BestOf,
-			Patience:                 cfg.Patience,
-			LengthPenalty:            cfg.LengthPenalty,
-			RepetitionPenalty:        cfg.RepetitionPenalty,
+			Patience:                 *cfg.Patience,
+			LengthPenalty:            *cfg.LengthPenalty,
+			RepetitionPenalty:        *cfg.RepetitionPenalty,
 			NoRepeatNgramSize:        cfg.NoRepeatNgramSize,
 			MaxLength:                maxLength,
-			SuppressBlank:            cfg.SuppressBlank,
+			SuppressBlank:            *cfg.SuppressBlank,
 			SamplingTemperature:      temp,
 			SuppressTokens:           suppressTokens,
 			MaxInitialTimestampIndex: maxInitialTSIdx,
@@ -353,7 +367,7 @@ func (m *Model) generateWithFallback(
 
 		var avgLogProb float32
 		if seqLen := len(genResult.SequenceIDs); seqLen > 0 {
-			cumLogProb := genResult.Score * float32(math.Pow(float64(seqLen), float64(cfg.LengthPenalty)))
+			cumLogProb := genResult.Score * float32(math.Pow(float64(seqLen), float64(*cfg.LengthPenalty)))
 			avgLogProb = cumLogProb / float32(seqLen+1)
 		}
 
@@ -369,7 +383,7 @@ func (m *Model) generateWithFallback(
 
 		needsFallback := false
 
-		if cfg.CompressionRatioThreshold > 0 && compressionRatio > cfg.CompressionRatioThreshold {
+		if *cfg.CompressionRatioThreshold > 0 && compressionRatio > *cfg.CompressionRatioThreshold {
 			needsFallback = true
 		} else {
 			if bestBelowCR == nil || fr.avgLogProb > bestBelowCR.avgLogProb {
@@ -377,8 +391,8 @@ func (m *Model) generateWithFallback(
 			}
 		}
 
-		if cfg.LogProbThreshold != nil && avgLogProb < *cfg.LogProbThreshold {
-			isNoSpeech := cfg.NoSpeechThreshold > 0 && genResult.NoSpeechProb > cfg.NoSpeechThreshold
+		if avgLogProb < *cfg.LogProbThreshold {
+			isNoSpeech := *cfg.NoSpeechThreshold > 0 && genResult.NoSpeechProb > *cfg.NoSpeechThreshold
 			if !isNoSpeech {
 				needsFallback = true
 			}
@@ -401,13 +415,13 @@ func (m *Model) generateWithFallback(
 }
 
 func shouldSkipSegment(genResult ct2bridge.GenerateResult, avgLogProb float32, cfg TranscribeConfig) bool {
-	if cfg.NoSpeechThreshold <= 0 {
+	if *cfg.NoSpeechThreshold <= 0 {
 		return false
 	}
-	if genResult.NoSpeechProb <= cfg.NoSpeechThreshold {
+	if genResult.NoSpeechProb <= *cfg.NoSpeechThreshold {
 		return false
 	}
-	if cfg.LogProbThreshold != nil && avgLogProb > *cfg.LogProbThreshold {
+	if avgLogProb > *cfg.LogProbThreshold {
 		return false
 	}
 	return true

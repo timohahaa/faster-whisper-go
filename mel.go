@@ -82,7 +82,9 @@ func computeMelSpectrogram(samples []float32, nMels int, filters []float32) ([]f
 	copy(padded, samples)
 
 	power, rawFrames := stft(padded, whisperNFFT, whisperHopLength)
-	// Drop the last frame to match Python's magnitudes = np.abs(stft[..., :-1]) ** 2.
+	// The last STFT frame is a padding artifact (produced from zero-padded tail samples)
+	// and does not contain meaningful spectral information. Dropping it ensures the
+	// mel spectrogram length matches the expected frame count for the given audio duration.
 	stftFrames := rawFrames - 1
 	freqBins := whisperFreqBins
 
