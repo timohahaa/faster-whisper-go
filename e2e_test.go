@@ -1,6 +1,4 @@
-//go:build integration
-
-package tests
+package whisper
 
 import (
 	"context"
@@ -10,8 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-
-	whisper "github.com/timohahaa/faster-whisper-go"
 )
 
 const testdataDir = ".testdata"
@@ -28,13 +24,13 @@ func TestTranscribeWAV(t *testing.T) {
 	}
 	t.Logf("loaded %d samples (%.2fs of audio)", len(samples), float64(len(samples))/16000)
 
-	model, err := whisper.Load("tiny", whisper.DefaultModelConfig())
+	model, err := Load("tiny", DefaultModelConfig())
 	if err != nil {
 		t.Fatalf("Load model: %v", err)
 	}
 	defer model.Close()
 
-	cfg := whisper.DefaultTranscribeConfig()
+	cfg := DefaultTranscribeConfig()
 	cfg.Language = "en"
 
 	result, err := model.Transcribe(context.Background(), samples, cfg)
@@ -47,6 +43,48 @@ func TestTranscribeWAV(t *testing.T) {
 	}
 	if len(result.Segments) == 0 {
 		t.Error("expected at least one segment")
+	}
+
+	t.Logf("transcription: %s", result.Text)
+	t.Logf("segments: %d, language: %s (prob=%.2f)",
+		len(result.Segments), result.Info.Language, result.Info.LanguageProbability)
+}
+
+func TestTranscribeBatchedWAV(t *testing.T) {
+	//wavPath := filepath.Join(testdataDir, "test.wav")
+	wavPath := filepath.Join(testdataDir, "anthropic_workshop_en.wav")
+
+	samples, err := readWAV(wavPath)
+	if err != nil {
+		t.Fatalf("readWAV(%q): %v", wavPath, err)
+	}
+	if len(samples) == 0 {
+		t.Fatal("WAV file contains no samples")
+	}
+	t.Logf("loaded %d samples (%.2fs of audio)", len(samples), float64(len(samples))/16000)
+
+	model, err := Load("tiny", DefaultModelConfig())
+	if err != nil {
+		t.Fatalf("Load model: %v", err)
+	}
+	defer model.Close()
+
+	cfg := DefaultTranscribeConfig()
+	cfg.Language = "en"
+
+	result, err := model.TranscribeBatched(context.Background(), samples, cfg)
+	if err != nil {
+		t.Fatalf("TranscribeBatched: %v", err)
+	}
+
+	if result.Text == "" {
+		t.Error("expected non-empty transcription text")
+	}
+	if len(result.Segments) == 0 {
+		t.Error("expected at least one segment")
+	}
+	if result.Info.Language != "en" {
+		t.Errorf("expected language %q, got %q", "en", result.Info.Language)
 	}
 
 	t.Logf("transcription: %s", result.Text)
