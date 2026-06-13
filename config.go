@@ -2,8 +2,10 @@ package whisper
 
 // ModelConfig controls model loading parameters.
 type ModelConfig struct {
-	Device      string // "cpu" or "cuda"
-	ComputeType string // "int8", "float16", "float32", "default"
+	Device      string  // "cpu" or "cuda"
+	ComputeType string  // "int8", "float16", "float32", "default"
+	CacheDir    *string // override cache directory; nil = default ($XDG_CACHE_HOME/faster-whisper-go or ~/.cache/faster-whisper-go)
+	Token       *string // Hugging Face token; nil = read from HF_TOKEN env
 }
 
 // DefaultModelConfig returns sensible defaults for CPU inference.

@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  unit-tests:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go vet ./...
+      - run: go test -count=1 ./...
+
+  e2e-tests:
+    name: E2E tests (ctranslate2 + transcription)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install build deps
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq cmake g++ libopenblas-dev pkg-config
+
+      - name: Cache ctranslate2
+        id: cache-ct2
+        uses: actions/cache@v4
+        with:
+          path: /usr/local/lib/libctranslate2*
+          key: ct2-v4.8.0-${{ runner.os }}
+
+      - name: Build and install ctranslate2
+        if: steps.cache-ct2.outputs.cache-hit != 'true'
+        run: ./scripts/build-ct2-linux.sh
+
+      - name: Update linker cache
+        run: sudo ldconfig
+
+      - run: go test -tags e2e -count=1 -timeout 300s -v ./...
