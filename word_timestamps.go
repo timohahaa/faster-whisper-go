@@ -18,6 +18,7 @@ func (m *Model) extractWordTimestamps(
 	taskToken int32,
 	numFrames int,
 	timeOffset float64,
+	prepend, append string,
 ) ([]Word, error) {
 	textTokens := filterTextTokens(tokens)
 	if len(textTokens) == 0 {
@@ -37,6 +38,7 @@ func (m *Model) extractWordTimestamps(
 
 	wordBounds := m.splitTokensIntoWords(textTokens)
 	words := assignWordTimestamps(wordBounds, alignment, timeOffset)
+	words = mergePunctuations(words, prepend, append)
 
 	return words, nil
 }
@@ -199,4 +201,85 @@ func computeWordProbability(weights []float32, tokenStart, nToks, nFrames, start
 	}
 
 	return sum / float32(nToks*frameSpan)
+}
+
+// mergePunctuations merges punctuation-only words with their neighbors:
+// - Prepend punctuations (e.g. opening quotes/brackets) merge with the next word.
+// - Append punctuations (e.g. periods, commas) merge with the previous word.
+// This matches the Python merge_punctuations behavior.
+func mergePunctuations(words []Word, prependChars, appendChars string) []Word {
+	if len(words) <= 1 {
+		return words
+	}
+
+	isPrepend := func(w string) bool {
+		w = strings.TrimSpace(w)
+		if w == "" {
+			return false
+		}
+		for _, r := range prependChars {
+			if w == string(r) {
+				return true
+			}
+		}
+		return false
+	}
+
+	isAppend := func(w string) bool {
+		w = strings.TrimSpace(w)
+		if w == "" {
+			return false
+		}
+		for _, r := range appendChars {
+			if w == string(r) {
+				return true
+			}
+		}
+		return false
+	}
+
+	// Pass 1: merge prepend punctuations (right to left).
+	// If word[i] is a prepend punctuation, merge it into word[j] (the next non-empty word).
+	i := len(words) - 2
+	j := len(words) - 1
+	for i >= 0 {
+		if isPrepend(words[i].Word) {
+			words[j].Word = words[i].Word + words[j].Word
+			words[j].Start = words[i].Start
+			words[j].Probability = (words[i].Probability + words[j].Probability) / 2
+			words[i].Word = ""
+		} else {
+			j = i
+		}
+		i--
+	}
+
+	// Pass 2: merge append punctuations (left to right).
+	i = 0
+	j = 1
+	for j < len(words) {
+		if words[i].Word == "" {
+			i = j
+			j++
+			continue
+		}
+		if isAppend(words[j].Word) {
+			words[i].Word = words[i].Word + words[j].Word
+			words[i].End = words[j].End
+			words[i].Probability = (words[i].Probability + words[j].Probability) / 2
+			words[j].Word = ""
+		} else {
+			i = j
+		}
+		j++
+	}
+
+	// Filter out empty words.
+	result := make([]Word, 0, len(words))
+	for _, w := range words {
+		if w.Word != "" {
+			result = append(result, w)
+		}
+	}
+	return result
 }

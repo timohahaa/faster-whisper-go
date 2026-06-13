@@ -90,6 +90,7 @@ func (m *Model) infer(ctx context.Context, samples []float32, cfg TranscribeConf
 	}
 
 	var segments []Segment
+	var lastSpeechTimestamp float64
 
 	for seek < totalFrames {
 		if err := ctx.Err(); err != nil {
@@ -98,16 +99,17 @@ func (m *Model) infer(ctx context.Context, samples []float32, cfg TranscribeConf
 
 		segmentSize := min(whisperNFrames, totalFrames-seek)
 		wr, err := m.processWindow(processWindowParams{
-			mel:            mel,
-			totalFrames:    totalFrames,
-			seek:           seek,
-			segmentSize:    segmentSize,
-			lang:           lang,
-			previousTokens: allTokens[promptResetSince:],
-			cfg:            cfg,
-			taskToken:      taskToken,
-			suppressTokens: suppressTokens,
-			segIdx:         segIdx,
+			mel:                 mel,
+			totalFrames:         totalFrames,
+			seek:                seek,
+			segmentSize:         segmentSize,
+			lang:                lang,
+			previousTokens:      allTokens[promptResetSince:],
+			cfg:                 cfg,
+			taskToken:           taskToken,
+			suppressTokens:      suppressTokens,
+			segIdx:              segIdx,
+			lastSpeechTimestamp: lastSpeechTimestamp,
 		})
 		if err != nil {
 			return nil, err
@@ -120,6 +122,7 @@ func (m *Model) infer(ctx context.Context, samples []float32, cfg TranscribeConf
 		allTokens = append(allTokens, wr.tokens...)
 		segIdx = wr.segIdx
 		segments = append(segments, wr.segments...)
+		lastSpeechTimestamp = wr.lastSpeechTimestamp
 
 		if !*cfg.ConditionOnPreviousText || wr.temperature > *cfg.PromptResetOnTemperature {
 			promptResetSince = len(allTokens)
@@ -201,25 +204,27 @@ func (m *Model) detectLanguageFromMel(mel []float32, totalFrames, seekOffset int
 }
 
 type processWindowParams struct {
-	mel            []float32
-	totalFrames    int
-	seek           int
-	segmentSize    int
-	lang           string
-	previousTokens []int32
-	cfg            TranscribeConfig
-	taskToken      int32
-	suppressTokens []int32
-	segIdx         int
+	mel                 []float32
+	totalFrames         int
+	seek                int
+	segmentSize         int
+	lang                string
+	previousTokens      []int32
+	cfg                 TranscribeConfig
+	taskToken           int32
+	suppressTokens      []int32
+	segIdx              int
+	lastSpeechTimestamp float64
 }
 
 type windowResult struct {
-	segments    []Segment
-	tokens      []int32
-	seek        int
-	segIdx      int
-	lang        string
-	temperature float32
+	segments            []Segment
+	tokens              []int32
+	seek                int
+	segIdx              int
+	lang                string
+	temperature         float32
+	lastSpeechTimestamp float64
 }
 
 func (m *Model) processWindow(p processWindowParams) (windowResult, error) {
@@ -240,7 +245,7 @@ func (m *Model) processWindow(p processWindowParams) (windowResult, error) {
 		}
 	}
 
-	prompt := m.buildPrompt(lang, p.previousTokens, p.cfg, p.taskToken)
+	prompt := m.buildPrompt(lang, p.previousTokens, p.cfg, p.taskToken, p.seek)
 
 	genResult, avgLogProb, temperature, compressionRatio, genErr := m.generateWithFallback(enc, prompt, p.cfg, p.suppressTokens)
 	if genErr != nil {
@@ -249,10 +254,11 @@ func (m *Model) processWindow(p processWindowParams) (windowResult, error) {
 
 	if shouldSkipSegment(genResult, avgLogProb, p.cfg) {
 		return windowResult{
-			seek:        p.seek + p.segmentSize,
-			segIdx:      p.segIdx,
-			lang:        lang,
-			temperature: temperature,
+			seek:                p.seek + p.segmentSize,
+			segIdx:              p.segIdx,
+			lang:                lang,
+			temperature:         temperature,
+			lastSpeechTimestamp: p.lastSpeechTimestamp,
 		}, nil
 	}
 
@@ -273,7 +279,7 @@ func (m *Model) processWindow(p processWindowParams) (windowResult, error) {
 
 		var words []Word
 		if !p.cfg.DisableTimestamps && p.cfg.WordTimestamps {
-			words, _ = m.extractWordTimestamps(enc, seg.tokens, lang, p.taskToken, p.segmentSize, seg.start)
+			words, _ = m.extractWordTimestamps(enc, seg.tokens, lang, p.taskToken, p.segmentSize, seg.start, p.cfg.PrependPunctuations, p.cfg.AppendPunctuations)
 		}
 
 		s := Segment{
@@ -294,23 +300,102 @@ func (m *Model) processWindow(p processWindowParams) (windowResult, error) {
 		segments = append(segments, s)
 	}
 
+	lastSpeechTS := p.lastSpeechTimestamp
+	seek := split.seek
+
+	if p.cfg.WordTimestamps && !p.cfg.DisableTimestamps && len(segments) > 0 {
+		// Adjust seek position by the last word end time when not a single-timestamp ending.
+		if !split.singleTimestampEnding {
+			if lastWordEnd := getLastWordEnd(segments); lastWordEnd > timeOffset {
+				seek = int(math.Round(lastWordEnd * framesPerSecond))
+			}
+		}
+
+		// Hallucination silence detection.
+		if p.cfg.HallucinationSilenceThreshold != nil {
+			threshold := float64(*p.cfg.HallucinationSilenceThreshold)
+			windowEndTime := float64(p.seek+whisperNFrames) * timePerFrame
+
+			// If first segment is anomalous and preceded by silence > threshold, skip it.
+			if first := firstSegmentWithWords(segments); first >= 0 && isSegmentAnomaly(segments[first]) {
+				gap := segments[first].Start.Seconds() - timeOffset
+				if gap > threshold {
+					seek = p.seek + int(math.Round(gap*framesPerSecond))
+					return windowResult{
+						seek:                seek,
+						segIdx:              p.segIdx,
+						lang:                lang,
+						temperature:         temperature,
+						lastSpeechTimestamp: lastSpeechTS,
+					}, nil
+				}
+			}
+
+			// Check each segment for hallucination surrounded by silence.
+			halLastEnd := lastSpeechTS
+			contentDuration := float64(p.totalFrames) * timePerFrame
+			for si := range segments {
+				if len(segments[si].Words) == 0 {
+					continue
+				}
+				if isSegmentAnomaly(segments[si]) {
+					segStart := segments[si].Start.Seconds()
+					segEnd := segments[si].End.Seconds()
+
+					halNextStart := timeOffset + segmentDuration
+					if next := firstSegmentWithWords(segments[si+1:]); next >= 0 {
+						halNextStart = segments[si+1+next].Words[0].Start.Seconds()
+					}
+
+					silenceBefore := segStart-halLastEnd > threshold ||
+						segStart < threshold ||
+						segStart-timeOffset < 2.0
+					silenceAfter := halNextStart-segEnd > threshold ||
+						(si+1 < len(segments) && isSegmentAnomaly(segments[si+1])) ||
+						windowEndTime-segEnd < 2.0
+
+					if silenceBefore && silenceAfter {
+						seek = int(math.Round(math.Max(timeOffset+1, segStart) * framesPerSecond))
+						if contentDuration-segEnd < threshold {
+							seek = p.totalFrames
+						}
+						segments = segments[:si]
+						break
+					}
+				}
+				halLastEnd = segments[si].End.Seconds()
+			}
+		}
+
+		// Update lastSpeechTimestamp from the last word end.
+		if end := getLastWordEnd(segments); end > 0 {
+			lastSpeechTS = end
+		}
+	}
+
 	return windowResult{
-		segments:    segments,
-		tokens:      tokens,
-		seek:        split.seek,
-		segIdx:      segIdx,
-		lang:        lang,
-		temperature: temperature,
+		segments:            segments,
+		tokens:              tokens,
+		seek:                seek,
+		segIdx:              segIdx,
+		lang:                lang,
+		temperature:         temperature,
+		lastSpeechTimestamp: lastSpeechTS,
 	}, nil
 }
 
-func (m *Model) buildPrompt(lang string, previousTokens []int32, cfg TranscribeConfig, taskToken int32) []int32 {
+func (m *Model) buildPrompt(lang string, previousTokens []int32, cfg TranscribeConfig, taskToken int32, seek int) []int32 {
 	var prompt []int32
 
-	if len(previousTokens) > 0 || cfg.Hotwords != "" {
+	prefix := ""
+	if seek == 0 {
+		prefix = cfg.Prefix
+	}
+
+	if len(previousTokens) > 0 || (cfg.Hotwords != "" && prefix == "") {
 		prompt = append(prompt, tokenSOTprev)
 
-		if cfg.Hotwords != "" {
+		if cfg.Hotwords != "" && prefix == "" {
 			hw := m.tokenizer.Encode(" " + strings.TrimSpace(cfg.Hotwords))
 			maxHW := maxTokenLength / 2
 			if len(hw) >= maxHW {
@@ -340,6 +425,18 @@ func (m *Model) buildPrompt(lang string, previousTokens []int32, cfg TranscribeC
 
 	if cfg.DisableTimestamps {
 		prompt = append(prompt, tokenNoTimestamps)
+	}
+
+	if prefix != "" {
+		prefixTokens := m.tokenizer.Encode(" " + strings.TrimSpace(prefix))
+		maxPrefix := maxTokenLength / 2
+		if len(prefixTokens) >= maxPrefix {
+			prefixTokens = prefixTokens[:maxPrefix-1]
+		}
+		if !cfg.DisableTimestamps {
+			prompt = append(prompt, tokenTimestampBeg)
+		}
+		prompt = append(prompt, prefixTokens...)
 	}
 
 	return prompt
@@ -376,9 +473,6 @@ func (m *Model) generateWithFallback(
 
 	for _, temp := range cfg.Temperature {
 		opts := ct2bridge.GenerateOptions{
-			BeamSize:                 cfg.BeamSize,
-			BestOf:                   cfg.BestOf,
-			Patience:                 *cfg.Patience,
 			LengthPenalty:            *cfg.LengthPenalty,
 			RepetitionPenalty:        *cfg.RepetitionPenalty,
 			NoRepeatNgramSize:        cfg.NoRepeatNgramSize,
@@ -387,6 +481,13 @@ func (m *Model) generateWithFallback(
 			SamplingTemperature:      temp,
 			SuppressTokens:           suppressTokens,
 			MaxInitialTimestampIndex: maxInitialTSIdx,
+		}
+		if temp > 0 {
+			opts.BeamSize = 1
+			opts.BestOf = cfg.BestOf
+		} else {
+			opts.BeamSize = cfg.BeamSize
+			opts.Patience = *cfg.Patience
 		}
 
 		genResult, err := m.bridge.Generate(enc, prompt, opts)
@@ -440,8 +541,13 @@ func (m *Model) generateWithFallback(
 	if pick == nil {
 		pick = best
 	}
-	return pick.genResult, pick.avgLogProb, pick.temperature, pick.compressionRatio, nil
+	// Use the last temperature from the chain (not pick's temperature) so that
+	// prompt_reset_on_temperature triggers correctly when all attempts failed.
+	lastTemp := cfg.Temperature[len(cfg.Temperature)-1]
+	return pick.genResult, pick.avgLogProb, lastTemp, pick.compressionRatio, nil
 }
+
+const framesPerSecond = float64(whisperSampleRate) / float64(whisperHopLength)
 
 func shouldSkipSegment(genResult ct2bridge.GenerateResult, avgLogProb float32, cfg TranscribeConfig) bool {
 	if *cfg.NoSpeechThreshold <= 0 {
@@ -454,6 +560,66 @@ func shouldSkipSegment(genResult ct2bridge.GenerateResult, avgLogProb float32, c
 		return false
 	}
 	return true
+}
+
+// getLastWordEnd returns the end time (in seconds) of the last word across all segments.
+func getLastWordEnd(segments []Segment) float64 {
+	for i := len(segments) - 1; i >= 0; i-- {
+		if len(segments[i].Words) > 0 {
+			return segments[i].Words[len(segments[i].Words)-1].End.Seconds()
+		}
+	}
+	if len(segments) > 0 {
+		return segments[len(segments)-1].End.Seconds()
+	}
+	return 0
+}
+
+// firstSegmentWithWords returns the index of the first segment that has word timestamps,
+// or -1 if none.
+func firstSegmentWithWords(segments []Segment) int {
+	for i, s := range segments {
+		if len(s.Words) > 0 {
+			return i
+		}
+	}
+	return -1
+}
+
+// wordAnomalyScore computes an anomaly score for a single word based on
+// its probability and duration (matching Python's word_anomaly_score).
+func wordAnomalyScore(w Word) float64 {
+	prob := float64(w.Probability)
+	dur := w.End.Seconds() - w.Start.Seconds()
+	score := 0.0
+	if prob < 0.15 {
+		score += 1.0
+	}
+	if dur < 0.133 {
+		score += (0.133 - dur) * 15
+	}
+	if dur > 2.0 {
+		score += dur - 2.0
+	}
+	return score
+}
+
+// isSegmentAnomaly checks if a segment is likely a hallucination based on
+// anomaly scores of its words (matching Python's is_segment_anomaly).
+func isSegmentAnomaly(seg Segment) bool {
+	if len(seg.Words) == 0 {
+		return false
+	}
+	words := seg.Words
+	if len(words) > 8 {
+		words = words[:8]
+	}
+	var score float64
+	for _, w := range words {
+		score += wordAnomalyScore(w)
+	}
+	n := float64(len(words))
+	return score >= 3 || score+0.01 >= n
 }
 
 func getCompressionRatio(text string) float32 {

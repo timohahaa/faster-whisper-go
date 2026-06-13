@@ -99,7 +99,10 @@ type TranscribeConfig struct {
 
 	// InitialPrompt is optional text to provide as context for the first window.
 	InitialPrompt string
-	// Hotwords are hint phrases for the model. Ignored if prefix is set.
+	// Prefix is optional text to provide as a prefix at the beginning of the
+	// first window. When set, Hotwords are ignored.
+	Prefix string
+	// Hotwords are hint phrases for the model. Ignored if Prefix is set.
 	Hotwords string
 	// ConditionOnPreviousText feeds the previous window output as prompt for the next.
 	// nil uses default (true).
@@ -132,6 +135,20 @@ type TranscribeConfig struct {
 	MaxNewTokens *int
 	// Multilingual performs language detection on every segment.
 	Multilingual bool
+
+	// HallucinationSilenceThreshold skips silent periods longer than this (in seconds)
+	// when a possible hallucination is detected during word timestamp extraction.
+	// nil means disabled. Only effective when WordTimestamps is true.
+	HallucinationSilenceThreshold *float32
+
+	// PrependPunctuations lists punctuation symbols that should be merged with
+	// the following word during word timestamp extraction.
+	// Empty uses default: "\"'"¿([{-"
+	PrependPunctuations string
+	// AppendPunctuations lists punctuation symbols that should be merged with
+	// the preceding word during word timestamp extraction.
+	// Empty uses default: "\"'.。,，!！?？:：")]}、"
+	AppendPunctuations string
 
 	// VadFilter enables Voice Activity Detection to filter out silence before
 	// transcription. Reduces processing time and can improve quality.
@@ -184,6 +201,12 @@ func (c *TranscribeConfig) applyDefaults() {
 	}
 	if c.MaxInitialTimestamp == nil {
 		c.MaxInitialTimestamp = ptrFloat32(1.0)
+	}
+	if c.PrependPunctuations == "" {
+		c.PrependPunctuations = "\"\u2018\u201c\u00bf([{-"
+	}
+	if c.AppendPunctuations == "" {
+		c.AppendPunctuations = "\"\u2019.\u3002,\uff0c!\uff01?\uff1f:\uff1a\u201d)]\u007d\u3001"
 	}
 }
 

@@ -290,8 +290,9 @@ func (t *tokenizer) SuppressedTokens(suppress []int32) []int32 {
 
 // segmentSplitResult holds the output of SplitSegmentsByTimestamps.
 type segmentSplitResult struct {
-	segments []rawSegment
-	seek     int
+	segments              []rawSegment
+	seek                  int
+	singleTimestampEnding bool
 }
 
 // SplitSegmentsByTimestamps parses timestamp tokens to determine segment boundaries
@@ -366,8 +367,9 @@ func (t *tokenizer) SplitSegmentsByTimestamps(
 	}
 
 	return segmentSplitResult{
-		segments: segments,
-		seek:     seek,
+		segments:              segments,
+		seek:                  seek,
+		singleTimestampEnding: singleTimestampEnding,
 	}
 }
 
