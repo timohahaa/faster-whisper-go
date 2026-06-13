@@ -2,6 +2,7 @@ package whisper
 
 import (
 	"math"
+	"sync"
 
 	"gonum.org/v1/gonum/dsp/fourier"
 )
@@ -26,19 +27,40 @@ func makeHannWindow(n int) []float64 {
 	return w
 }
 
+type fftState struct {
+	fft      *fourier.FFT
+	coeffBuf []complex128
+	frame    []float64
+}
+
+var fftPool = sync.Pool{
+	New: func() any {
+		return &fftState{
+			fft:      fourier.NewFFT(whisperNFFT),
+			coeffBuf: make([]complex128, whisperFreqBins),
+			frame:    make([]float64, whisperNFFT),
+		}
+	},
+}
+
 // stft computes the Short-Time Fourier Transform.
-// Returns magnitudes squared (power spectrum) as a flat slice of length
+// Returns magnitudes squared (power spectrum) as a flat float32 slice of length
 // nFrames * freqBins (row-major, frame-major), plus the frame count.
-func stft(samples []float32, nFFT, hopLength int) (power []float64, nFrames int) {
-	// Reflect-pad the signal by nFFT/2 on each side so the first and last STFT
-	// frames are centered on the start and end of the original signal.
-	// This mirrors np.pad(mode='reflect') from the Python Whisper implementation.
+// extraPadRight zero-samples are appended to the signal before reflect-padding.
+func stft(samples []float32, nFFT, hopLength, extraPadRight int) (power []float32, nFrames int) {
 	padLen := nFFT / 2
-	paddedLen := padLen + len(samples) + padLen
+	signalLen := len(samples) + extraPadRight
+	paddedLen := padLen + signalLen + padLen
 	padded := make([]float64, paddedLen)
 	for i := range padLen {
 		padded[padLen-1-i] = float64(samples[min(i+1, len(samples)-1)])
-		padded[padLen+len(samples)+i] = float64(samples[max(len(samples)-2-i, 0)])
+	}
+	// Right reflect-pad uses the extended signal (zeros beyond samples).
+	for i := range padLen {
+		idx := signalLen - 2 - i
+		if idx >= 0 && idx < len(samples) {
+			padded[padLen+signalLen+i] = float64(samples[idx])
+		}
 	}
 	for i, s := range samples {
 		padded[padLen+i] = float64(s)
@@ -48,23 +70,26 @@ func stft(samples []float32, nFFT, hopLength int) (power []float64, nFrames int)
 	freqBins := nFFT/2 + 1
 	nFrames = (paddedLen - nFFT) / hopLength + 1
 
-	fft := fourier.NewFFT(nFFT)
-	coeffBuf := make([]complex128, nFFT/2+1)
-	power = make([]float64, nFrames*freqBins)
+	st := fftPool.Get().(*fftState)
+	coeffBuf := st.coeffBuf
+	frame := st.frame
+	power = make([]float32, nFrames*freqBins)
 
-	frame := make([]float64, nFFT)
 	for i := range nFrames {
 		offset := i * hopLength
-		for j := range nFFT {
-			frame[j] = padded[offset+j] * window[j]
+		seg := padded[offset : offset+nFFT]
+		for j, w := range window {
+			frame[j] = seg[j] * w
 		}
-		coeffs := fft.Coefficients(coeffBuf, frame)
+		st.fft.Coefficients(coeffBuf, frame)
 		base := i * freqBins
-		for j := range freqBins {
-			re := real(coeffs[j])
-			im := imag(coeffs[j])
-			power[base+j] = re*re + im*im
+		for j, c := range coeffBuf {
+			re := real(c)
+			im := imag(c)
+			power[base+j] = float32(re*re + im*im)
 		}
 	}
+
+	fftPool.Put(st)
 	return power, nFrames
 }

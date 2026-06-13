@@ -50,7 +50,8 @@ func TestComputeMelSpectrogram(t *testing.T) {
 
 	nMels := 80
 	filters := computeMelFilterbank(nMels, whisperNFFT, whisperSampleRate)
-	mel, totalFrames := computeMelSpectrogram(samples, nMels, filters)
+	sparse := buildSparseFilters(filters, nMels, whisperFreqBins)
+	mel, totalFrames := computeMelSpectrogram(samples, nMels, sparse)
 
 	expectedLen := nMels * totalFrames
 	if len(mel) != expectedLen {
@@ -78,7 +79,8 @@ func TestComputeMelSpectrogram30s(t *testing.T) {
 
 	nMels := 80
 	filters := computeMelFilterbank(nMels, whisperNFFT, whisperSampleRate)
-	mel, totalFrames := computeMelSpectrogram(samples, nMels, filters)
+	sparse := buildSparseFilters(filters, nMels, whisperFreqBins)
+	mel, totalFrames := computeMelSpectrogram(samples, nMels, sparse)
 
 	if totalFrames < whisperNFrames {
 		t.Errorf("30s audio should produce at least %d frames, got %d", whisperNFrames, totalFrames)
@@ -153,6 +155,7 @@ func TestExtractMelWindow(t *testing.T) {
 
 func BenchmarkComputeMelSpectrogram(b *testing.B) {
 	filters := computeMelFilterbank(80, whisperNFFT, whisperSampleRate)
+	sparse := buildSparseFilters(filters, 80, whisperFreqBins)
 
 	b.Run("1s", func(b *testing.B) {
 		samples := make([]float32, whisperSampleRate)
@@ -161,7 +164,7 @@ func BenchmarkComputeMelSpectrogram(b *testing.B) {
 		}
 		b.ResetTimer()
 		for b.Loop() {
-			computeMelSpectrogram(samples, 80, filters)
+			computeMelSpectrogram(samples, 80, sparse)
 		}
 	})
 
@@ -172,7 +175,7 @@ func BenchmarkComputeMelSpectrogram(b *testing.B) {
 		}
 		b.ResetTimer()
 		for b.Loop() {
-			computeMelSpectrogram(samples, 80, filters)
+			computeMelSpectrogram(samples, 80, sparse)
 		}
 	})
 }

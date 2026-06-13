@@ -105,6 +105,7 @@ func loadTokenizer(modelDir string) (*tokenizer, error) {
 // Decode converts token IDs into text, skipping special tokens.
 func (t *tokenizer) Decode(ids []int32) string {
 	var buf strings.Builder
+	buf.Grow(len(ids) * 4)
 	for _, id := range ids {
 		if id >= tokenEOT {
 			continue
@@ -240,8 +241,9 @@ func (t *tokenizer) Encode(text string) []int32 {
 	if text == "" {
 		return nil
 	}
-	var ids []int32
-	for _, chunk := range gpt2PreTokenizer.FindAllString(text, -1) {
+	chunks := gpt2PreTokenizer.FindAllString(text, -1)
+	ids := make([]int32, 0, len(chunks)*2)
+	for _, chunk := range chunks {
 		bpeWord := t.textToBPEString(chunk)
 		ids = append(ids, t.bpeEncode(bpeWord)...)
 	}
@@ -251,6 +253,7 @@ func (t *tokenizer) Encode(text string) []int32 {
 // textToBPEString converts raw text to the GPT-2 byte-level BPE representation.
 func (t *tokenizer) textToBPEString(text string) string {
 	var buf strings.Builder
+	buf.Grow(len(text))
 	for i := 0; i < len(text); i++ {
 		r, ok := t.byteEncoder[text[i]]
 		if ok {
@@ -268,18 +271,33 @@ func (t *tokenizer) bpeEncode(word string) []int32 {
 		return nil
 	}
 
-	var symbols []string
-	for _, r := range word {
-		symbols = append(symbols, string(r))
+	runes := []rune(word)
+	n := len(runes)
+	if n == 1 {
+		if id, ok := t.tokenToID[word]; ok {
+			return []int32{id}
+		}
+		return nil
 	}
+
+	symbols := make([]string, n)
+	for i, r := range runes {
+		symbols[i] = string(r)
+	}
+
+	// Pre-allocate a buffer for building pair keys to avoid per-iteration allocation.
+	var pairKey []byte
 
 	for len(symbols) > 1 {
 		bestIdx := -1
 		bestRank := len(t.mergeRank)
 
 		for i := 0; i < len(symbols)-1; i++ {
-			pair := symbols[i] + " " + symbols[i+1]
-			if rank, ok := t.mergeRank[pair]; ok && rank < bestRank {
+			pairKey = pairKey[:0]
+			pairKey = append(pairKey, symbols[i]...)
+			pairKey = append(pairKey, ' ')
+			pairKey = append(pairKey, symbols[i+1]...)
+			if rank, ok := t.mergeRank[string(pairKey)]; ok && rank < bestRank {
 				bestRank = rank
 				bestIdx = i
 			}
@@ -289,15 +307,11 @@ func (t *tokenizer) bpeEncode(word string) []int32 {
 			break
 		}
 
-		merged := symbols[bestIdx] + symbols[bestIdx+1]
-		newSymbols := make([]string, 0, len(symbols)-1)
-		newSymbols = append(newSymbols, symbols[:bestIdx]...)
-		newSymbols = append(newSymbols, merged)
-		newSymbols = append(newSymbols, symbols[bestIdx+2:]...)
-		symbols = newSymbols
+		symbols[bestIdx] = symbols[bestIdx] + symbols[bestIdx+1]
+		symbols = append(symbols[:bestIdx+1], symbols[bestIdx+2:]...)
 	}
 
-	var ids []int32
+	ids := make([]int32, 0, len(symbols))
 	for _, sym := range symbols {
 		if id, ok := t.tokenToID[sym]; ok {
 			ids = append(ids, id)

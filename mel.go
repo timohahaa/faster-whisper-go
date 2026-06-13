@@ -14,6 +14,14 @@ const (
 	inputStride = 2
 )
 
+// melFilterSpan represents a non-zero range within a single mel filter row.
+// Triangular mel filters are mostly zeros; storing only the non-zero span
+// avoids iterating over ~95% zero values during the matmul.
+type melFilterSpan struct {
+	start   int       // first non-zero freq bin index
+	weights []float32 // non-zero filter values (length = end-start)
+}
+
 // computeMelFilterbank builds a bank of nMels triangular band-pass filters
 // using the Slaney mel scale (linear below 1000 Hz, logarithmic above).
 // Returns a flat slice of length nMels*(nFFT/2+1), row-major (mel bin major).
@@ -73,42 +81,67 @@ func computeMelFilterbank(nMels, nFFT, sampleRate int) []float32 {
 	return filters
 }
 
+// buildSparseFilters extracts the non-zero spans from the dense filterbank.
+func buildSparseFilters(filters []float32, nMels, freqBins int) []melFilterSpan {
+	spans := make([]melFilterSpan, nMels)
+	for i := range nMels {
+		base := i * freqBins
+		start := -1
+		end := 0
+		for j := range freqBins {
+			if filters[base+j] != 0 {
+				if start < 0 {
+					start = j
+				}
+				end = j + 1
+			}
+		}
+		if start < 0 {
+			start = 0
+		}
+		spans[i] = melFilterSpan{
+			start:   start,
+			weights: make([]float32, end-start),
+		}
+		copy(spans[i].weights, filters[base+start:base+end])
+	}
+	return spans
+}
+
 // computeMelSpectrogram computes a log-mel spectrogram for audio of any length.
-// filters is a precomputed mel filterbank from computeMelFilterbank.
+// sparse is a precomputed sparse mel filterbank from buildSparseFilters.
 // Returns a flat []float32 of length nMels*totalFrames (row-major, mel-bin-major)
 // and the total number of STFT frames.
-func computeMelSpectrogram(samples []float32, nMels int, filters []float32) ([]float32, int) {
-	padded := make([]float32, len(samples)+whisperHopLength)
-	copy(padded, samples)
-
-	power, rawFrames := stft(padded, whisperNFFT, whisperHopLength)
-	// The last STFT frame is a padding artifact (produced from zero-padded tail samples)
-	// and does not contain meaningful spectral information. Dropping it ensures the
-	// mel spectrogram length matches the expected frame count for the given audio duration.
+func computeMelSpectrogram(samples []float32, nMels int, sparse []melFilterSpan) ([]float32, int) {
+	power, rawFrames := stft(samples, whisperNFFT, whisperHopLength, whisperHopLength)
 	stftFrames := rawFrames - 1
 	freqBins := whisperFreqBins
 
 	out := make([]float32, nMels*stftFrames)
 
-	maxVal := math.Inf(-1)
-	for i := range nMels {
-		filterBase := i * freqBins
-		outBase := i * stftFrames
-		for t := range stftFrames {
-			var sum float64
-			powerBase := t * freqBins
-			for j := range freqBins {
-				sum += float64(filters[filterBase+j]) * power[powerBase+j]
+	// Frame-outer loop: reads each frame of power once (good L2 cache behavior),
+	// applies all mel filters to it. Sparse filters skip zero regions.
+	var maxVal float32 = -1e30
+	for t := range stftFrames {
+		powerSlice := power[t*freqBins : t*freqBins+freqBins]
+		for i, sp := range sparse {
+			var sum float32
+			start := sp.start
+			for k, w := range sp.weights {
+				sum += w * powerSlice[start+k]
 			}
-			v := math.Log10(math.Max(sum, 1e-10))
-			out[outBase+t] = float32(v)
+			if sum < 1e-10 {
+				sum = 1e-10
+			}
+			v := float32(math.Log10(float64(sum)))
+			out[i*stftFrames+t] = v
 			if v > maxVal {
 				maxVal = v
 			}
 		}
 	}
 
-	floor := float32(maxVal - 8.0)
+	floor := maxVal - 8.0
 	for i := range out {
 		v := out[i]
 		if v < floor {

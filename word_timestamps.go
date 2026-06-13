@@ -258,7 +258,19 @@ func (m *Model) addWordTimestamps(
 
 // filterTextTokens returns only non-special, non-timestamp tokens.
 func filterTextTokens(tokens []int32) []int32 {
-	var out []int32
+	// Fast path: if all tokens are text tokens, return the input slice directly.
+	allText := true
+	for _, id := range tokens {
+		if id >= tokenEOT {
+			allText = false
+			break
+		}
+	}
+	if allText {
+		return tokens
+	}
+
+	out := make([]int32, 0, len(tokens))
 	for _, id := range tokens {
 		if id < tokenEOT {
 			out = append(out, id)

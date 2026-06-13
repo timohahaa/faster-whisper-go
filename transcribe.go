@@ -7,6 +7,7 @@ import (
 	"errors"
 	"math"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/timohahaa/faster-whisper-go/internal/ct2bridge"
@@ -59,7 +60,7 @@ func (m *Model) infer(ctx context.Context, samples []float32, cfg TranscribeConf
 		durationAfterVad = duration
 	}
 
-	mel, totalFrames := computeMelSpectrogram(samples, m.nMels, m.melFilters)
+	mel, totalFrames := computeMelSpectrogram(samples, m.nMels, m.sparseFilters)
 
 	lang := cfg.Language
 	var langProb float32
@@ -169,7 +170,7 @@ func (m *Model) DetectLanguage(ctx context.Context, samples []float32) (Language
 	}
 
 	audio := padOrTrim(samples, whisperSampleRate*whisperChunkLen)
-	mel, totalFrames := computeMelSpectrogram(audio, m.nMels, m.melFilters)
+	mel, totalFrames := computeMelSpectrogram(audio, m.nMels, m.sparseFilters)
 	window := extractMelWindow(mel, totalFrames, m.nMels, 0, whisperNFrames)
 
 	enc, err := m.bridge.Encode(window, m.nMels, whisperNFrames)
@@ -649,19 +650,35 @@ func isAnomalyPunctuation(word string) bool {
 	return false
 }
 
+var zlibPool = sync.Pool{
+	New: func() any {
+		var buf bytes.Buffer
+		w := zlib.NewWriter(&buf)
+		return &zlibState{w: w, buf: &buf}
+	},
+}
+
+type zlibState struct {
+	w   *zlib.Writer
+	buf *bytes.Buffer
+}
+
 func getCompressionRatio(text string) float32 {
 	raw := []byte(text)
 	if len(raw) == 0 {
 		return 0
 	}
-	var buf bytes.Buffer
-	w := zlib.NewWriter(&buf)
-	w.Write(raw)
-	w.Close()
-	if buf.Len() == 0 {
+	st := zlibPool.Get().(*zlibState)
+	st.buf.Reset()
+	st.w.Reset(st.buf)
+	st.w.Write(raw)
+	st.w.Close()
+	compressed := st.buf.Len()
+	zlibPool.Put(st)
+	if compressed == 0 {
 		return 0
 	}
-	return float32(len(raw)) / float32(buf.Len())
+	return float32(len(raw)) / float32(compressed)
 }
 
 func padOrTrim(samples []float32, length int) []float32 {

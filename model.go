@@ -8,10 +8,10 @@ import (
 
 // Model is a loaded Whisper model ready for transcription.
 type Model struct {
-	bridge     *ct2bridge.Model
-	tokenizer  *tokenizer
-	nMels      int
-	melFilters []float32
+	bridge        *ct2bridge.Model
+	tokenizer     *tokenizer
+	nMels         int
+	sparseFilters []melFilterSpan
 }
 
 // Load opens a Whisper model. modelSizeOrPath is either a known model size
@@ -57,11 +57,14 @@ func Load(modelSizeOrPath string, cfg ModelConfig) (*Model, error) {
 		return nil, fmt.Errorf("model reports 0 mel frequency bins")
 	}
 
+	dense := computeMelFilterbank(nMels, whisperNFFT, whisperSampleRate)
+	sparse := buildSparseFilters(dense, nMels, whisperFreqBins)
+
 	return &Model{
-		bridge:     bridge,
-		tokenizer:  tok,
-		nMels:      nMels,
-		melFilters: computeMelFilterbank(nMels, whisperNFFT, whisperSampleRate),
+		bridge:        bridge,
+		tokenizer:     tok,
+		nMels:         nMels,
+		sparseFilters: sparse,
 	}, nil
 }
 

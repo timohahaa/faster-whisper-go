@@ -63,7 +63,7 @@ func TestHannWindow(t *testing.T) {
 func TestStft(t *testing.T) {
 	t.Run("Silence", func(t *testing.T) {
 		samples := make([]float32, whisperSampleRate)
-		power, nFrames := stft(samples, whisperNFFT, whisperHopLength)
+		power, nFrames := stft(samples, whisperNFFT, whisperHopLength, 0)
 
 		if nFrames == 0 {
 			t.Fatal("stft returned 0 frames")
@@ -93,7 +93,7 @@ func TestStft(t *testing.T) {
 			samples[i] = float32(math.Sin(2 * math.Pi * freq * float64(i) / float64(whisperSampleRate)))
 		}
 
-		power, nFrames := stft(samples, whisperNFFT, whisperHopLength)
+		power, nFrames := stft(samples, whisperNFFT, whisperHopLength, 0)
 		if nFrames == 0 {
 			t.Fatal("stft returned 0 frames")
 		}
@@ -102,7 +102,7 @@ func TestStft(t *testing.T) {
 		// Expected bin for 1000 Hz: bin = freq * nFFT / sampleRate = 1000 * 400 / 16000 = 25.
 		expectedBin := 25
 		maxBin := 0
-		maxVal := 0.0
+		var maxVal float32
 		frame5 := 5
 		for j := range freqBins {
 			v := power[frame5*freqBins+j]
@@ -120,7 +120,7 @@ func TestStft(t *testing.T) {
 	t.Run("FrameCount", func(t *testing.T) {
 		nSamples := whisperSampleRate * whisperChunkLen
 		samples := make([]float32, nSamples)
-		_, nFrames := stft(samples, whisperNFFT, whisperHopLength)
+		_, nFrames := stft(samples, whisperNFFT, whisperHopLength, 0)
 
 		expected := 3001
 		if nFrames != expected {
@@ -137,7 +137,7 @@ func BenchmarkStft(b *testing.B) {
 		}
 		b.ResetTimer()
 		for b.Loop() {
-			stft(samples, whisperNFFT, whisperHopLength)
+			stft(samples, whisperNFFT, whisperHopLength, 0)
 		}
 	})
 
@@ -148,7 +148,7 @@ func BenchmarkStft(b *testing.B) {
 		}
 		b.ResetTimer()
 		for b.Loop() {
-			stft(samples, whisperNFFT, whisperHopLength)
+			stft(samples, whisperNFFT, whisperHopLength, 0)
 		}
 	})
 }
