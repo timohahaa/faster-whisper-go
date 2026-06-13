@@ -28,9 +28,12 @@ func Load(path, device, computeType string) (*Model, error) {
 	cComputeType := C.CString(computeType)
 	defer C.free(unsafe.Pointer(cComputeType))
 
-	ptr := C.ct2_model_load(cPath, cDevice, cComputeType)
+	var cErr *C.char
+	ptr := C.ct2_model_load(cPath, cDevice, cComputeType, &cErr)
 	if ptr == nil {
-		return nil, errors.New(C.GoString(C.ct2_last_error()))
+		err := errors.New(C.GoString(cErr))
+		C.free(unsafe.Pointer(cErr))
+		return nil, err
 	}
 
 	return &Model{ptr: ptr}, nil
@@ -85,14 +88,18 @@ func (m *Model) Encode(mel []float32, nMels, nFrames int) (*EncoderOutput, error
 		return nil, errors.New("mel spectrogram is required")
 	}
 
+	var cErr *C.char
 	ptr := C.ct2_encode(
 		m.ptr,
 		(*C.float)(unsafe.Pointer(&mel[0])),
 		C.size_t(nMels),
 		C.size_t(nFrames),
+		&cErr,
 	)
 	if ptr == nil {
-		return nil, errors.New(C.GoString(C.ct2_last_error()))
+		err := errors.New(C.GoString(cErr))
+		C.free(unsafe.Pointer(cErr))
+		return nil, err
 	}
 
 	return &EncoderOutput{ptr: ptr}, nil
@@ -108,7 +115,6 @@ type GenerateOptions struct {
 	NoRepeatNgramSize        int
 	MaxLength                int
 	SuppressBlank            bool
-	ReturnScores             bool
 	SamplingTemperature      float32
 	SuppressTokens           []int32
 	MaxInitialTimestampIndex int
@@ -154,7 +160,6 @@ func (m *Model) Generate(enc *EncoderOutput, prompt []int32, opts GenerateOption
 		C.int(opts.NoRepeatNgramSize),
 		C.int(opts.MaxLength),
 		C.bool(opts.SuppressBlank),
-		C.bool(opts.ReturnScores),
 		C.float(opts.SamplingTemperature),
 		suppressPtr,
 		C.size_t(suppressCount),

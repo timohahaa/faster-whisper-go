@@ -19,12 +19,6 @@ struct ct2_encoder_output {
 
 namespace {
 
-thread_local std::string g_last_error;
-
-void set_last_error(const std::exception& e) {
-    g_last_error = e.what();
-}
-
 char* copy_string(const std::string& value) {
     char* out = static_cast<char*>(std::malloc(value.size() + 1));
     if (out == nullptr) {
@@ -58,6 +52,12 @@ ctranslate2::StorageView make_mel_features(
         ctranslate2::Device::CPU);
 }
 
+void set_error_out(char** error_out, const char* message) {
+    if (error_out != nullptr) {
+        *error_out = copy_string(message);
+    }
+}
+
 ct2_generate_result make_generate_error(const char* message) {
     ct2_generate_result result{};
     result.error = copy_string(message);
@@ -74,15 +74,11 @@ ct2_detect_result make_detect_error(const char* message) {
 
 extern "C" {
 
-const char* ct2_last_error(void) {
-    return g_last_error.c_str();
-}
-
 ct2_model* ct2_model_load(
-    const char* path, const char* device, const char* compute_type) {
-    g_last_error.clear();
+    const char* path, const char* device, const char* compute_type,
+    char** error_out) {
     if (path == nullptr || path[0] == '\0') {
-        g_last_error = "model path is required";
+        set_error_out(error_out, "model path is required");
         return nullptr;
     }
 
@@ -94,7 +90,7 @@ ct2_model* ct2_model_load(
             parse_compute_type(compute_type));
         return model.release();
     } catch (const std::exception& e) {
-        set_last_error(e);
+        set_error_out(error_out, e.what());
         return nullptr;
     }
 }
@@ -119,14 +115,14 @@ int32_t ct2_model_n_mels(ct2_model* m) {
 
 ct2_encoder_output* ct2_encode(
     ct2_model* m,
-    const float* mel, size_t n_mels, size_t n_frames) {
-    g_last_error.clear();
+    const float* mel, size_t n_mels, size_t n_frames,
+    char** error_out) {
     if (m == nullptr || m->whisper == nullptr) {
-        g_last_error = "model is null";
+        set_error_out(error_out, "model is null");
         return nullptr;
     }
     if (mel == nullptr || n_mels == 0 || n_frames == 0) {
-        g_last_error = "mel spectrogram is required";
+        set_error_out(error_out, "mel spectrogram is required");
         return nullptr;
     }
 
@@ -137,7 +133,7 @@ ct2_encoder_output* ct2_encode(
         auto out = new ct2_encoder_output{std::move(encoded)};
         return out;
     } catch (const std::exception& e) {
-        set_last_error(e);
+        set_error_out(error_out, e.what());
         return nullptr;
     }
 }
@@ -154,7 +150,7 @@ ct2_generate_result ct2_generate(
     float patience, float length_penalty,
     float repetition_penalty, int no_repeat_ngram_size,
     int max_length,
-    bool suppress_blank, bool return_scores,
+    bool suppress_blank,
     float sampling_temperature,
     const int32_t* suppress_tokens, size_t suppress_tokens_count,
     int max_initial_timestamp_index) {
@@ -182,7 +178,7 @@ ct2_generate_result ct2_generate(
             no_repeat_ngram_size > 0 ? static_cast<size_t>(no_repeat_ngram_size) : 0;
         options.max_length = max_length > 0 ? static_cast<size_t>(max_length) : 448;
         options.suppress_blank = suppress_blank;
-        options.return_scores = return_scores;
+        options.return_scores = true;
         options.return_no_speech_prob = true;
         options.max_initial_timestamp_index =
             max_initial_timestamp_index >= 0 ? static_cast<size_t>(max_initial_timestamp_index) : 50;
@@ -303,28 +299,38 @@ ct2_align_result ct2_align(
     }
 
     try {
-        std::vector<int> start_seq(start_sequence_count);
+        std::vector<size_t> start_seq(start_sequence_count);
         for (size_t i = 0; i < start_sequence_count; ++i) {
-            start_seq[i] = static_cast<int>(start_sequence[i]);
+            start_seq[i] = static_cast<size_t>(start_sequence[i]);
         }
 
-        std::vector<int> tokens(text_tokens_count);
+        std::vector<size_t> tokens(text_tokens_count);
         for (size_t i = 0; i < text_tokens_count; ++i) {
-            tokens[i] = static_cast<int>(text_tokens[i]);
+            tokens[i] = static_cast<size_t>(text_tokens[i]);
         }
 
-        std::vector<std::vector<int>> token_batches = {tokens};
+        std::vector<std::vector<size_t>> token_batches = {tokens};
         std::vector<size_t> num_frames_vec = {num_frames};
 
         int filter_width = median_filter_width > 0 ? median_filter_width : 7;
 
-        std::vector<ctranslate2::models::WhisperAlignmentResult> results =
-            m->whisper->align(
-                encoder_output->view,
-                start_seq,
-                token_batches,
-                num_frames_vec,
-                filter_width);
+        auto futures = m->whisper->align(
+            encoder_output->view,
+            start_seq,
+            token_batches,
+            num_frames_vec,
+            static_cast<ctranslate2::dim_t>(filter_width));
+
+        if (futures.empty()) {
+            out.error = copy_string("align returned no results");
+            return out;
+        }
+
+        std::vector<ctranslate2::models::WhisperAlignmentResult> results;
+        results.reserve(futures.size());
+        for (auto& f : futures) {
+            results.push_back(f.get());
+        }
 
         if (results.empty() || results.front().alignments.empty()) {
             out.error = copy_string("align returned no results");
@@ -333,24 +339,25 @@ ct2_align_result ct2_align(
 
         const auto& alignment = results.front();
         size_t n_tokens = alignment.alignments.size();
-        size_t n_frames_out = 0;
-        if (n_tokens > 0) {
-            n_frames_out = alignment.alignments.front().size();
-        }
 
+        // Synthesize a weight matrix from (start, end) alignment pairs.
+        // Each token gets weight 1.0 for frames in [start, end).
+        size_t n_frames_out = num_frames;
         out.num_tokens = n_tokens;
         out.num_frames = n_frames_out;
         out.weights = static_cast<float*>(
-            std::malloc(n_tokens * n_frames_out * sizeof(float)));
+            std::calloc(n_tokens * n_frames_out, sizeof(float)));
         if (out.weights == nullptr) {
             out.error = copy_string("failed to allocate alignment weights");
             return out;
         }
 
         for (size_t t = 0; t < n_tokens; ++t) {
-            const auto& row = alignment.alignments[t];
-            for (size_t f = 0; f < n_frames_out; ++f) {
-                out.weights[t * n_frames_out + f] = row[f];
+            auto [start_f, end_f] = alignment.alignments[t];
+            for (auto f = start_f; f < end_f && static_cast<size_t>(f) < n_frames_out; ++f) {
+                if (f >= 0) {
+                    out.weights[t * n_frames_out + static_cast<size_t>(f)] = 1.0f;
+                }
             }
         }
 

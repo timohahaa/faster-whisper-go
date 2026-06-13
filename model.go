@@ -8,9 +8,10 @@ import (
 
 // Model is a loaded Whisper model ready for transcription.
 type Model struct {
-	bridge    *ct2bridge.Model
-	tokenizer *tokenizer
-	nMels     int
+	bridge     *ct2bridge.Model
+	tokenizer  *tokenizer
+	nMels      int
+	melFilters []float32
 }
 
 // Load opens a Whisper model from a CTranslate2 model directory.
@@ -37,13 +38,14 @@ func Load(modelDir string, cfg ModelConfig) (*Model, error) {
 
 	nMels := bridge.NMels()
 	if nMels == 0 {
-		nMels = whisperNMels80
+		nMels = 80
 	}
 
 	return &Model{
-		bridge:    bridge,
-		tokenizer: tok,
-		nMels:     nMels,
+		bridge:     bridge,
+		tokenizer:  tok,
+		nMels:      nMels,
+		melFilters: computeMelFilterbank(nMels, whisperNFFT, whisperSampleRate),
 	}, nil
 }
 

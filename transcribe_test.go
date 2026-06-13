@@ -44,9 +44,8 @@ func TestPadOrTrim(t *testing.T) {
 	})
 }
 
-func TestApplyDefaults(t *testing.T) {
-	cfg := TranscribeConfig{}
-	cfg = applyDefaults(cfg)
+func TestDefaultTranscribeConfig(t *testing.T) {
+	cfg := DefaultTranscribeConfig()
 
 	if cfg.BeamSize != 5 {
 		t.Errorf("BeamSize: got %d, want 5", cfg.BeamSize)
@@ -75,24 +74,17 @@ func TestApplyDefaults(t *testing.T) {
 	if len(cfg.SuppressTokens) != 1 || cfg.SuppressTokens[0] != -1 {
 		t.Errorf("SuppressTokens: got %v, want [-1]", cfg.SuppressTokens)
 	}
-}
-
-func TestApplyDefaultsPreserves(t *testing.T) {
-	cfg := TranscribeConfig{
-		BeamSize:    3,
-		BestOf:      2,
-		Temperature: []float32{0.0},
+	if cfg.Patience != 1.0 {
+		t.Errorf("Patience: got %f, want 1.0", cfg.Patience)
 	}
-	cfg = applyDefaults(cfg)
-
-	if cfg.BeamSize != 3 {
-		t.Errorf("BeamSize should be preserved: got %d", cfg.BeamSize)
+	if cfg.LengthPenalty != 1.0 {
+		t.Errorf("LengthPenalty: got %f, want 1.0", cfg.LengthPenalty)
 	}
-	if cfg.BestOf != 2 {
-		t.Errorf("BestOf should be preserved: got %d", cfg.BestOf)
+	if cfg.RepetitionPenalty != 1.0 {
+		t.Errorf("RepetitionPenalty: got %f, want 1.0", cfg.RepetitionPenalty)
 	}
-	if len(cfg.Temperature) != 1 {
-		t.Errorf("Temperature should be preserved: got %d entries", len(cfg.Temperature))
+	if cfg.NoRepeatNgramSize != 0 {
+		t.Errorf("NoRepeatNgramSize: got %d, want 0", cfg.NoRepeatNgramSize)
 	}
 }
 

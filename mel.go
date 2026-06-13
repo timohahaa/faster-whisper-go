@@ -4,9 +4,7 @@ import "math"
 
 const (
 	whisperSampleRate = 16000
-	whisperNMels80    = 80  // mel bins for Whisper v1/v2 models
-	whisperNMels128   = 128 // mel bins for Whisper large-v3
-	whisperChunkLen   = 30  // seconds
+	whisperChunkLen   = 30 // seconds
 	// whisperNFrames is the number of STFT frames in one 30-second chunk:
 	// sampleRate * chunkLen / hopLength = 16000 * 30 / 160 = 3000.
 	whisperNFrames = 3000
@@ -17,58 +15,60 @@ const (
 	inputStride = 2
 )
 
-// hzToMel converts frequency in Hz to the mel scale using the HTK formula
-// mel = 2595 * log10(1 + hz/700).
-func hzToMel(hz float64) float64 {
-	return 2595.0 * math.Log10(1.0+hz/700.0)
-}
-
-// melToHz is the inverse of hzToMel.
-func melToHz(mel float64) float64 {
-	return 700.0 * (math.Pow(10.0, mel/2595.0) - 1.0)
-}
-
 // computeMelFilterbank builds a bank of nMels triangular band-pass filters
-// stored as a flat slice of length nMels*(nFFT/2+1), row-major (mel bin major).
+// using the Slaney mel scale (linear below 1000 Hz, logarithmic above).
+// Returns a flat slice of length nMels*(nFFT/2+1), row-major (mel bin major).
+//
+// This matches the Python faster-whisper FeatureExtractor.get_mel_filters exactly.
 func computeMelFilterbank(nMels, nFFT, sampleRate int) []float32 {
 	freqBins := nFFT/2 + 1
-	melMin := hzToMel(0)
-	melMax := hzToMel(float64(sampleRate) / 2.0)
+
+	fftfreqs := make([]float64, freqBins)
+	for i := range freqBins {
+		fftfreqs[i] = float64(i) * float64(sampleRate) / float64(nFFT)
+	}
+
+	const (
+		minMel    = 0.0
+		maxMel    = 45.245640471924965
+		fMin      = 0.0
+		fSp       = 200.0 / 3.0
+		minLogHz  = 1000.0
+		minLogMel = (minLogHz - fMin) / fSp
+	)
+	logstep := math.Log(6.4) / 27.0
 
 	nPoints := nMels + 2
-	melPoints := make([]float64, nPoints)
-	hzPoints := make([]float64, nPoints)
-	binPoints := make([]float64, nPoints)
-
-	melStep := (melMax - melMin) / float64(nMels+1)
-	nFFTf := float64(nFFT)
-	srf := float64(sampleRate)
+	mels := make([]float64, nPoints)
+	freqs := make([]float64, nPoints)
 	for i := range nPoints {
-		m := melMin + float64(i)*melStep
-		melPoints[i] = m
-		hz := melToHz(m)
-		hzPoints[i] = hz
-		binPoints[i] = hz * nFFTf / srf
+		m := minMel + float64(i)*(maxMel-minMel)/float64(nPoints-1)
+		mels[i] = m
+		if m < minLogMel {
+			freqs[i] = fMin + fSp*m
+		} else {
+			freqs[i] = minLogHz * math.Exp(logstep*(m-minLogMel))
+		}
+	}
+
+	fdiff := make([]float64, nPoints-1)
+	for i := range fdiff {
+		fdiff[i] = freqs[i+1] - freqs[i]
 	}
 
 	filters := make([]float32, nMels*freqBins)
 	for i := range nMels {
-		left := binPoints[i]
-		center := binPoints[i+1]
-		right := binPoints[i+2]
 		base := i * freqBins
-
 		for j := range freqBins {
-			freq := float64(j)
-			if freq >= left && freq <= center && center > left {
-				filters[base+j] = float32((freq - left) / (center - left))
-			} else if freq > center && freq <= right && right > center {
-				filters[base+j] = float32((right - freq) / (right - center))
+			lower := (fftfreqs[j] - freqs[i]) / fdiff[i]
+			upper := (freqs[i+2] - fftfreqs[j]) / fdiff[i+1]
+			v := math.Min(lower, upper)
+			if v > 0 {
+				filters[base+j] = float32(v)
 			}
 		}
 
-		// Slaney normalization
-		enorm := float32(2.0 / (hzPoints[i+2] - hzPoints[i]))
+		enorm := float32(2.0 / (freqs[i+2] - freqs[i]))
 		for j := range freqBins {
 			filters[base+j] *= enorm
 		}
@@ -77,13 +77,16 @@ func computeMelFilterbank(nMels, nFFT, sampleRate int) []float32 {
 }
 
 // computeMelSpectrogram computes a log-mel spectrogram for audio of any length.
+// filters is a precomputed mel filterbank from computeMelFilterbank.
 // Returns a flat []float32 of length nMels*totalFrames (row-major, mel-bin-major)
 // and the total number of STFT frames.
-func computeMelSpectrogram(samples []float32, nMels int) ([]float32, int) {
-	power, stftFrames := stft(samples, whisperNFFT, whisperHopLength)
-	freqBins := whisperFreqBins
+func computeMelSpectrogram(samples []float32, nMels int, filters []float32) ([]float32, int) {
+	padded := make([]float32, len(samples)+whisperHopLength)
+	copy(padded, samples)
 
-	filters := computeMelFilterbank(nMels, whisperNFFT, whisperSampleRate)
+	power, rawFrames := stft(padded, whisperNFFT, whisperHopLength)
+	stftFrames := rawFrames - 1
+	freqBins := whisperFreqBins
 
 	out := make([]float32, nMels*stftFrames)
 

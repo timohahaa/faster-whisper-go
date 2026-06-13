@@ -327,8 +327,7 @@ func (t *tokenizer) SplitSegmentsByTimestamps(
 	var segments []rawSegment
 
 	if len(consecutiveTimestamps) > 0 {
-		slices := make([]int, len(consecutiveTimestamps))
-		copy(slices, consecutiveTimestamps)
+		slices := append([]int(nil), consecutiveTimestamps...)
 		if singleTimestampEnding {
 			slices = append(slices, len(tokens))
 		}
@@ -342,7 +341,6 @@ func (t *tokenizer) SplitSegmentsByTimestamps(
 			endTime := timeOffset + float64(endPos)*timePrecision
 
 			segments = append(segments, rawSegment{
-				seek:   seek,
 				start:  startTime,
 				end:    endTime,
 				tokens: copyTokens(slicedTokens),
@@ -370,7 +368,6 @@ func (t *tokenizer) SplitSegmentsByTimestamps(
 		}
 
 		segments = append(segments, rawSegment{
-			seek:   seek,
 			start:  timeOffset,
 			end:    timeOffset + duration,
 			tokens: copyTokens(tokens),
@@ -411,10 +408,8 @@ func (t *tokenizer) LanguageToken(lang string) int32 {
 
 // rawSegment is an intermediate segment before converting to public Segment type.
 type rawSegment struct {
-	seek   int
 	start  float64
 	end    float64
-	text   string
 	tokens []int32
 }
 
