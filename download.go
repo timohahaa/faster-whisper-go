@@ -34,8 +34,10 @@ var modelFiles = []string{
 	"model.bin",
 	"config.json",
 	"tokenizer.json",
+}
+
+var optionalModelFiles = []string{
 	"preprocessor_config.json",
-	"vocabulary.json",
 }
 
 // AvailableModels returns the list of known model size names.
@@ -107,7 +109,16 @@ func modelFilesExist(dir string) bool {
 			return false
 		}
 	}
-	return true
+	return vocabularyFileExists(dir)
+}
+
+func vocabularyFileExists(dir string) bool {
+	for _, name := range []string{"vocabulary.json", "vocabulary.txt"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 func downloadModel(repoID, destDir string) error {
@@ -123,16 +134,33 @@ func downloadModel(repoID, destDir string) error {
 
 		url := fmt.Sprintf("https://huggingface.co/%s/resolve/main/%s", repoID, filename)
 		if err := downloadFile(url, dest); err != nil {
-			if filename == "vocabulary.json" {
-				// Some models use vocabulary.txt instead.
-				altURL := fmt.Sprintf("https://huggingface.co/%s/resolve/main/vocabulary.txt", repoID)
-				altDest := filepath.Join(destDir, "vocabulary.txt")
-				if err2 := downloadFile(altURL, altDest); err2 == nil {
-					continue
-				}
-			}
 			os.Remove(dest)
 			return fmt.Errorf("download %s: %w", filename, err)
+		}
+	}
+
+	if !vocabularyFileExists(destDir) {
+		url := fmt.Sprintf("https://huggingface.co/%s/resolve/main/vocabulary.json", repoID)
+		dest := filepath.Join(destDir, "vocabulary.json")
+		if err := downloadFile(url, dest); err != nil {
+			os.Remove(dest)
+			altURL := fmt.Sprintf("https://huggingface.co/%s/resolve/main/vocabulary.txt", repoID)
+			altDest := filepath.Join(destDir, "vocabulary.txt")
+			if err2 := downloadFile(altURL, altDest); err2 != nil {
+				os.Remove(altDest)
+				return fmt.Errorf("download vocabulary: %w", err)
+			}
+		}
+	}
+
+	for _, filename := range optionalModelFiles {
+		dest := filepath.Join(destDir, filename)
+		if _, err := os.Stat(dest); err == nil {
+			continue
+		}
+		url := fmt.Sprintf("https://huggingface.co/%s/resolve/main/%s", repoID, filename)
+		if err := downloadFile(url, dest); err != nil {
+			os.Remove(dest)
 		}
 	}
 
