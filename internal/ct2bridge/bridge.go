@@ -222,11 +222,12 @@ func (m *Model) DetectLanguage(enc *EncoderOutput) (DetectLanguageResult, error)
 	}, nil
 }
 
-// AlignResult holds token-to-frame alignment weights from the Whisper align pass.
+// AlignResult holds the raw DTW alignment output from CTranslate2's align pass.
 type AlignResult struct {
-	Weights   []float32 // flattened [NumTokens x NumFrames], row-major
-	NumTokens int
-	NumFrames int
+	TextTokenProbs []float32 // per-token probability [NumTokens]
+	TextIndices    []int32   // text index for each alignment pair [NumAlignments]
+	TimeIndices    []int32   // time index for each alignment pair [NumAlignments]
+	NumTokens      int
 }
 
 // Align computes cross-attention alignment between text tokens and audio frames.
@@ -264,16 +265,30 @@ func (m *Model) Align(enc *EncoderOutput, startSeq, textTokens []int32, numFrame
 		return AlignResult{}, errors.New(C.GoString(result.error))
 	}
 
-	totalSize := int(result.num_tokens) * int(result.num_frames)
-	weights := make([]float32, totalSize)
-	if totalSize > 0 && result.weights != nil {
-		copy(weights, unsafe.Slice((*float32)(unsafe.Pointer(result.weights)), totalSize))
+	nTokens := int(result.num_tokens)
+	nAlign := int(result.num_alignments)
+
+	probs := make([]float32, nTokens)
+	if nTokens > 0 && result.text_token_probs != nil {
+		copy(probs, unsafe.Slice((*float32)(unsafe.Pointer(result.text_token_probs)), nTokens))
+	}
+
+	textIdx := make([]int32, nAlign)
+	timeIdx := make([]int32, nAlign)
+	if nAlign > 0 {
+		if result.text_indices != nil {
+			copy(textIdx, unsafe.Slice((*int32)(unsafe.Pointer(result.text_indices)), nAlign))
+		}
+		if result.time_indices != nil {
+			copy(timeIdx, unsafe.Slice((*int32)(unsafe.Pointer(result.time_indices)), nAlign))
+		}
 	}
 
 	return AlignResult{
-		Weights:   weights,
-		NumTokens: int(result.num_tokens),
-		NumFrames: int(result.num_frames),
+		TextTokenProbs: probs,
+		TextIndices:    textIdx,
+		TimeIndices:    timeIdx,
+		NumTokens:      nTokens,
 	}, nil
 }
 

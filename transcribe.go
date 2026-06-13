@@ -265,6 +265,7 @@ func (m *Model) processWindow(p processWindowParams) (windowResult, error) {
 	split := m.tokenizer.SplitSegmentsByTimestamps(genResult.SequenceIDs, timeOffset, p.segmentSize, segmentDuration, p.seek)
 
 	var segments []Segment
+	var segmentTokens [][]int32
 	var tokens []int32
 	segIdx := p.segIdx
 
@@ -277,17 +278,11 @@ func (m *Model) processWindow(p processWindowParams) (windowResult, error) {
 		tokens = append(tokens, seg.tokens...)
 		segIdx++
 
-		var words []Word
-		if !p.cfg.DisableTimestamps && p.cfg.WordTimestamps {
-			words, _ = m.extractWordTimestamps(enc, seg.tokens, lang, p.taskToken, p.segmentSize, seg.start, p.cfg.PrependPunctuations, p.cfg.AppendPunctuations)
-		}
-
 		s := Segment{
 			ID:               segIdx,
 			Start:            secToDuration(seg.start),
 			End:              secToDuration(seg.end),
 			Text:             text,
-			Words:            words,
 			Temperature:      temperature,
 			AvgLogProb:       avgLogProb,
 			CompressionRatio: compressionRatio,
@@ -298,12 +293,20 @@ func (m *Model) processWindow(p processWindowParams) (windowResult, error) {
 			s.End = 0
 		}
 		segments = append(segments, s)
+		segmentTokens = append(segmentTokens, seg.tokens)
 	}
 
 	lastSpeechTS := p.lastSpeechTimestamp
 	seek := split.seek
 
 	if p.cfg.WordTimestamps && !p.cfg.DisableTimestamps && len(segments) > 0 {
+		segments, lastSpeechTS = m.addWordTimestamps(
+			enc, segments, segmentTokens,
+			lang, p.taskToken, p.segmentSize, p.seek,
+			p.cfg.PrependPunctuations, p.cfg.AppendPunctuations,
+			lastSpeechTS,
+		)
+
 		// Adjust seek position by the last word end time when not a single-timestamp ending.
 		if !split.singleTimestampEnding {
 			if lastWordEnd := getLastWordEnd(segments); lastWordEnd > timeOffset {
@@ -604,13 +607,24 @@ func wordAnomalyScore(w Word) float64 {
 	return score
 }
 
+const anomalyPunctuation = `"'"¿([{-"'.。,，!！?？:：")]}、`
+
 // isSegmentAnomaly checks if a segment is likely a hallucination based on
 // anomaly scores of its words (matching Python's is_segment_anomaly).
+// Punctuation-only words are filtered out before scoring.
 func isSegmentAnomaly(seg Segment) bool {
 	if len(seg.Words) == 0 {
 		return false
 	}
-	words := seg.Words
+	var words []Word
+	for _, w := range seg.Words {
+		if !isAnomalyPunctuation(w.Word) {
+			words = append(words, w)
+		}
+	}
+	if len(words) == 0 {
+		return false
+	}
 	if len(words) > 8 {
 		words = words[:8]
 	}
@@ -620,6 +634,19 @@ func isSegmentAnomaly(seg Segment) bool {
 	}
 	n := float64(len(words))
 	return score >= 3 || score+0.01 >= n
+}
+
+func isAnomalyPunctuation(word string) bool {
+	word = strings.TrimSpace(word)
+	if word == "" {
+		return true
+	}
+	for _, r := range anomalyPunctuation {
+		if word == string(r) {
+			return true
+		}
+	}
+	return false
 }
 
 func getCompressionRatio(text string) float32 {

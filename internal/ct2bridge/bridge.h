@@ -58,8 +58,10 @@ ct2_detect_result ct2_detect_language(
 
 typedef struct {
     size_t num_tokens;
-    size_t num_frames;
-    float* weights;
+    float* text_token_probs;       /* [num_tokens] per-token probability */
+    size_t num_alignments;
+    int32_t* text_indices;          /* [num_alignments] text index from DTW */
+    int32_t* time_indices;          /* [num_alignments] time index from DTW */
     char* error;
 } ct2_align_result;
 

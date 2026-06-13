@@ -5,10 +5,19 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"unicode/utf8"
 )
+
+// gpt2PreTokenizer is the GPT-2 pre-tokenization regex that splits text into
+// chunks before BPE encoding. Each chunk is BPE-encoded independently, preventing
+// merges from crossing word boundaries.
+//
+// Matches (in priority order): English contractions, optional-space + letters,
+// optional-space + digits, optional-space + punctuation/symbols, whitespace runs.
+var gpt2PreTokenizer = regexp.MustCompile(`'s|'t|'re|'ve|'m|'ll|'d| ?\pL+| ?\pN+| ?[^\s\pL\pN]+|\s+`)
 
 // Well-known Whisper special token offsets (relative to base vocab size of 50257).
 const (
@@ -109,25 +118,132 @@ func (t *tokenizer) Decode(ids []int32) string {
 	return buf.String()
 }
 
-// Encode converts text into token IDs using GPT-2 BPE.
-// Note: this is a simplified implementation that treats the entire input as one
-// BPE word (no regex-based pre-tokenization). Suitable for short texts like
-// prompts and hotwords.
+// decodeWithTimestamps converts token IDs into text, rendering timestamp tokens
+// as "<|0.00|>"-style markers instead of skipping them.
+func (t *tokenizer) decodeWithTimestamps(ids []int32) string {
+	var buf strings.Builder
+	for _, id := range ids {
+		if id >= tokenTimestampBeg {
+			ts := float64(id-tokenTimestampBeg) * timePrecision
+			fmt.Fprintf(&buf, "<|%.2f|>", ts)
+			continue
+		}
+		if id >= tokenEOT {
+			continue
+		}
+		tok, ok := t.idToToken[id]
+		if !ok {
+			continue
+		}
+		t.decodeTokenInto(&buf, tok)
+	}
+	return buf.String()
+}
+
+var cjkLanguages = map[string]bool{
+	"zh": true, "ja": true, "th": true,
+	"lo": true, "my": true, "yue": true,
+}
+
+// splitToWordTokens groups tokens into words. For CJK languages the split is
+// character-based (unicode boundaries); for others it is space-based.
+// Returns (words, wordTokens) where words retain leading spaces from BPE
+// (matching Python's split_to_word_tokens).
+func (t *tokenizer) splitToWordTokens(tokens []int32, lang string) ([]string, [][]int32) {
+	if cjkLanguages[lang] {
+		return t.splitTokensOnUnicode(tokens)
+	}
+	return t.splitTokensOnSpaces(tokens)
+}
+
+// splitTokensOnUnicode splits tokens at valid unicode decode boundaries.
+// Each token that decodes without replacement chars forms its own word.
+func (t *tokenizer) splitTokensOnUnicode(tokens []int32) ([]string, [][]int32) {
+	decodedFull := t.decodeWithTimestamps(tokens)
+	const replacementChar = '\ufffd'
+
+	var words []string
+	var wordTokens [][]int32
+	var currentTokens []int32
+	unicodeOffset := 0
+
+	for _, id := range tokens {
+		currentTokens = append(currentTokens, id)
+		decoded := t.decodeWithTimestamps(currentTokens)
+
+		replacementCharIndex := -1
+		for i, r := range decoded {
+			if r == replacementChar {
+				replacementCharIndex = i + unicodeOffset
+				break
+			}
+		}
+
+		skip := false
+		if replacementCharIndex >= 0 {
+			fullRunes := []rune(decodedFull)
+			if replacementCharIndex < len(fullRunes) && fullRunes[replacementCharIndex] != replacementChar {
+				skip = true
+			}
+		}
+
+		if replacementCharIndex < 0 || !skip {
+			words = append(words, decoded)
+			wordTokens = append(wordTokens, currentTokens)
+			currentTokens = nil
+			unicodeOffset += len([]rune(decoded))
+		}
+	}
+
+	return words, wordTokens
+}
+
+// splitTokensOnSpaces splits tokens into words by spaces, using unicode
+// split as a base, then merging subwords that don't start with a space.
+func (t *tokenizer) splitTokensOnSpaces(tokens []int32) ([]string, [][]int32) {
+	subwords, subwordTokensList := t.splitTokensOnUnicode(tokens)
+
+	var words []string
+	var wordTokens [][]int32
+
+	for i, subword := range subwords {
+		subToks := subwordTokensList[i]
+		isSpecial := len(subToks) > 0 && subToks[0] >= tokenEOT
+		withSpace := strings.HasPrefix(subword, " ")
+		isPunct := len(strings.TrimSpace(subword)) == 1 && isPunctuationChar(strings.TrimSpace(subword))
+
+		if isSpecial || withSpace || isPunct || len(words) == 0 {
+			words = append(words, subword)
+			wordTokens = append(wordTokens, subToks)
+		} else {
+			words[len(words)-1] += subword
+			wordTokens[len(wordTokens)-1] = append(wordTokens[len(wordTokens)-1], subToks...)
+		}
+	}
+
+	return words, wordTokens
+}
+
+func isPunctuationChar(s string) bool {
+	if len(s) != 1 {
+		return false
+	}
+	const punctuation = "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~"
+	return strings.ContainsAny(s, punctuation)
+}
+
+// Encode converts text into token IDs using GPT-2 BPE with regex pre-tokenization.
+// The input is first split into chunks by the GPT-2 regex (contractions, words,
+// numbers, punctuation, whitespace), then each chunk is byte-level BPE-encoded
+// independently — matching the HuggingFace/Python tokenizer behavior.
 func (t *tokenizer) Encode(text string) []int32 {
 	if text == "" {
 		return nil
 	}
-
-	bpeText := t.textToBPEString(text)
-
-	words := strings.Split(bpeText, " ")
 	var ids []int32
-	for _, word := range words {
-		if word == "" {
-			continue
-		}
-		wordTokens := t.bpeEncode(word)
-		ids = append(ids, wordTokens...)
+	for _, chunk := range gpt2PreTokenizer.FindAllString(text, -1) {
+		bpeWord := t.textToBPEString(chunk)
+		ids = append(ids, t.bpeEncode(bpeWord)...)
 	}
 	return ids
 }

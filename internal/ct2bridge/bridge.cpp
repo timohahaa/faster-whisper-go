@@ -368,27 +368,34 @@ ct2_align_result ct2_align(
         }
 
         const auto& alignment = results.front();
-        size_t n_tokens = alignment.alignments.size();
 
-        // Synthesize a weight matrix from (start, end) alignment pairs.
-        // Each token gets weight 1.0 for frames in [start, end).
-        size_t n_frames_out = num_frames;
+        // Return text_token_probs.
+        size_t n_tokens = alignment.text_token_probs.size();
         out.num_tokens = n_tokens;
-        out.num_frames = n_frames_out;
-        out.weights = static_cast<float*>(
-            std::calloc(n_tokens * n_frames_out, sizeof(float)));
-        if (out.weights == nullptr) {
-            out.error = copy_string("failed to allocate alignment weights");
+        out.text_token_probs = static_cast<float*>(
+            std::malloc(n_tokens * sizeof(float)));
+        if (out.text_token_probs == nullptr) {
+            out.error = copy_string("failed to allocate text_token_probs");
             return out;
         }
+        for (size_t i = 0; i < n_tokens; ++i) {
+            out.text_token_probs[i] = alignment.text_token_probs[i];
+        }
 
-        for (size_t t = 0; t < n_tokens; ++t) {
-            auto [start_f, end_f] = alignment.alignments[t];
-            for (auto f = start_f; f < end_f && static_cast<size_t>(f) < n_frames_out; ++f) {
-                if (f >= 0) {
-                    out.weights[t * n_frames_out + static_cast<size_t>(f)] = 1.0f;
-                }
-            }
+        // Return raw alignment pairs (text_index, time_index).
+        size_t n_align = alignment.alignments.size();
+        out.num_alignments = n_align;
+        out.text_indices = static_cast<int32_t*>(
+            std::malloc(n_align * sizeof(int32_t)));
+        out.time_indices = static_cast<int32_t*>(
+            std::malloc(n_align * sizeof(int32_t)));
+        if (out.text_indices == nullptr || out.time_indices == nullptr) {
+            out.error = copy_string("failed to allocate alignment indices");
+            return out;
+        }
+        for (size_t i = 0; i < n_align; ++i) {
+            out.text_indices[i] = static_cast<int32_t>(alignment.alignments[i].first);
+            out.time_indices[i] = static_cast<int32_t>(alignment.alignments[i].second);
         }
 
         return out;
@@ -424,12 +431,16 @@ void ct2_align_result_free(ct2_align_result* r) {
     if (r == nullptr) {
         return;
     }
-    std::free(r->weights);
+    std::free(r->text_token_probs);
+    std::free(r->text_indices);
+    std::free(r->time_indices);
     std::free(r->error);
-    r->weights = nullptr;
+    r->text_token_probs = nullptr;
+    r->text_indices = nullptr;
+    r->time_indices = nullptr;
     r->error = nullptr;
     r->num_tokens = 0;
-    r->num_frames = 0;
+    r->num_alignments = 0;
 }
 
 }  // extern "C"

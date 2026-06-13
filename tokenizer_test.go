@@ -1,6 +1,7 @@
 package whisper
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -320,6 +321,138 @@ func TestGetCompressionRatio(t *testing.T) {
 		repeated := getCompressionRatio("Hello Hello Hello Hello Hello Hello Hello Hello Hello Hello Hello Hello Hello Hello Hello Hello")
 		if repeated <= normal {
 			t.Errorf("repetitive text (%f) should have higher ratio than normal (%f)", repeated, normal)
+		}
+	})
+}
+
+func TestGPT2PreTokenizer(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  []string
+	}{
+		{
+			name:  "SimpleWords",
+			input: "Hello world",
+			want:  []string{"Hello", " world"},
+		},
+		{
+			name:  "Contractions",
+			input: "I'm don't they'll we've you're",
+			want:  []string{"I", "'m", " don", "'t", " they", "'ll", " we", "'ve", " you", "'re"},
+		},
+		{
+			name:  "MixedContent",
+			input: "Hello, world! 123",
+			want:  []string{"Hello", ",", " world", "!", " 123"},
+		},
+		{
+			name:  "Cyrillic",
+			input: "Привет мир",
+			want:  []string{"Привет", " мир"},
+		},
+		{
+			name:  "PromptLike",
+			input: " Transcribe the following audio:",
+			want:  []string{" Transcribe", " the", " following", " audio", ":"},
+		},
+		{
+			name:  "PunctuationCluster",
+			input: `"Hello"`,
+			want:  []string{`"`, "Hello", `"`},
+		},
+		{
+			name:  "NumbersAndLetters",
+			input: "test123 456abc",
+			want:  []string{"test", "123", " 456", "abc"},
+		},
+		{
+			name:  "LeadingSpace",
+			input: " hello",
+			want:  []string{" hello"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := gpt2PreTokenizer.FindAllString(tt.input, -1)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("gpt2PreTokenizer.FindAllString(%q) =\n  %q\nwant:\n  %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestEncodePreTokenization(t *testing.T) {
+	tok := &tokenizer{
+		idToToken:   make(map[int32]string),
+		tokenToID:   make(map[string]int32),
+		langToToken: make(map[string]int32),
+		mergeRank:   make(map[string]int),
+	}
+	buildByteDecoderInto(tok)
+	tok.byteEncoder = buildByteEncoder(tok)
+
+	toBPE := func(raw string) string { return tok.textToBPEString(raw) }
+
+	addToken := func(id int32, raw string) {
+		bpe := toBPE(raw)
+		tok.idToToken[id] = bpe
+		tok.tokenToID[bpe] = id
+	}
+
+	// Build merges so that multi-rune BPE strings can be formed.
+	// Each raw string is converted to its BPE rune sequence, and we add
+	// successive pair merges so bpeEncode produces a single token.
+	addMergesForWord := func(raw string) {
+		bpe := toBPE(raw)
+		runes := []rune(bpe)
+		if len(runes) <= 1 {
+			return
+		}
+		merged := string(runes[0])
+		for i := 1; i < len(runes); i++ {
+			next := string(runes[i])
+			tok.mergeRank[merged+" "+next] = len(tok.mergeRank)
+			merged = merged + next
+		}
+	}
+
+	addToken(10, "I")
+	addToken(11, "'m")
+	addToken(12, " don")
+	addToken(13, "'t")
+	addToken(14, " hello")
+	addToken(15, ",")
+	addToken(16, " world")
+	addToken(17, "!")
+
+	for _, raw := range []string{"'m", " don", "'t", " hello", ",", " world", "!"} {
+		addMergesForWord(raw)
+	}
+
+	t.Run("Contractions", func(t *testing.T) {
+		ids := tok.Encode("I'm don't")
+		want := []int32{10, 11, 12, 13}
+		if !reflect.DeepEqual(ids, want) {
+			t.Errorf("Encode(\"I'm don't\") = %v, want %v", ids, want)
+		}
+	})
+
+	t.Run("MixedPunctuation", func(t *testing.T) {
+		ids := tok.Encode(" hello, world!")
+		want := []int32{14, 15, 16, 17}
+		if !reflect.DeepEqual(ids, want) {
+			t.Errorf("Encode(\" hello, world!\") = %v, want %v", ids, want)
+		}
+	})
+
+	t.Run("RoundTrip", func(t *testing.T) {
+		text := " hello, world!"
+		ids := tok.Encode(text)
+		decoded := tok.Decode(ids)
+		if decoded != text {
+			t.Errorf("roundtrip: Encode+Decode(%q) = %q", text, decoded)
 		}
 	})
 }
