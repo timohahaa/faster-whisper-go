@@ -36,6 +36,7 @@ type TranscriptionInfo struct {
 	Language            string
 	LanguageProbability float32
 	Duration            time.Duration
+	DurationAfterVad    time.Duration // duration of audio after VAD filtering (equals Duration if VAD is off)
 }
 
 // LanguageDetection holds the result of language identification.

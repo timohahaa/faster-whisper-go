@@ -37,8 +37,29 @@ func (m *Model) infer(ctx context.Context, samples []float32, cfg TranscribeConf
 
 	cfg.applyDefaults()
 
-	mel, totalFrames := computeMelSpectrogram(samples, m.nMels, m.melFilters)
 	duration := time.Duration(float64(len(samples)) / whisperSampleRate * float64(time.Second))
+
+	var speechChunks []SpeechChunk
+	var durationAfterVad time.Duration
+	if cfg.VadFilter {
+		vadCfg := cfg.VadConfig
+		if vadCfg == nil {
+			vadCfg = &VadConfig{}
+		}
+		speechChunks = GetSpeechTimestamps(samples, *vadCfg)
+		samples = collectChunks(samples, speechChunks)
+		if len(samples) == 0 {
+			return &Result{Info: TranscriptionInfo{
+				Duration:         duration,
+				DurationAfterVad: 0,
+			}}, nil
+		}
+		durationAfterVad = time.Duration(float64(len(samples)) / whisperSampleRate * float64(time.Second))
+	} else {
+		durationAfterVad = duration
+	}
+
+	mel, totalFrames := computeMelSpectrogram(samples, m.nMels, m.melFilters)
 
 	lang := cfg.Language
 	var langProb float32
@@ -105,6 +126,13 @@ func (m *Model) infer(ctx context.Context, samples []float32, cfg TranscribeConf
 		}
 	}
 
+	if speechChunks != nil {
+		tsMap := newSpeechTimestampsMap(speechChunks)
+		for i := range segments {
+			tsMap.restoreSegmentTimestamps(&segments[i])
+		}
+	}
+
 	var textBuf strings.Builder
 	for i, seg := range segments {
 		if i > 0 {
@@ -120,6 +148,7 @@ func (m *Model) infer(ctx context.Context, samples []float32, cfg TranscribeConf
 			Language:            lang,
 			LanguageProbability: langProb,
 			Duration:            duration,
+			DurationAfterVad:    durationAfterVad,
 		},
 	}, nil
 }

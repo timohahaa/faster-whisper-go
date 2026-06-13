@@ -1,2 +1,4 @@
+github.com/zserge/govad v0.0.0-20260330155402-74750eabf3a4 h1:C+qXvLKxPHy1ATWWF+mAIp/5JtLawNahy/ICPPVrgPg=
+github.com/zserge/govad v0.0.0-20260330155402-74750eabf3a4/go.mod h1:e0lKrmGHlIQjttwSN+Ojgrj7P25o5w9jYOlAkyQ6JFk=
 gonum.org/v1/gonum v0.17.0 h1:VbpOemQlsSMrYmn7T2OUvQ4dqxQXU+ouZFQsZOx50z4=
 gonum.org/v1/gonum v0.17.0/go.mod h1:El3tOrEuMpv2UdMrbNlKEh9vd86bmQ6vqIcDwxEOc1E=
