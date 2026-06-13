@@ -59,6 +59,12 @@ type ModelConfig struct {
 	DeviceIndex []int  // GPU device IDs to use; nil/empty defaults to [0]
 	CPUThreads  int    // threads per replica (intra_threads); 0 = CTranslate2 default (4)
 	NumWorkers  int    // number of replicas (inter_threads); 0 = 1
+
+	// CacheDir is the directory for caching downloaded models.
+	// Empty uses $XDG_CACHE_HOME/faster-whisper-go/ or ~/.cache/faster-whisper-go/.
+	CacheDir string
+	// LocalFilesOnly disables network downloads; only cached models are used.
+	LocalFilesOnly bool
 }
 
 // DefaultModelConfig returns sensible defaults for CPU inference.
