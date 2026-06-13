@@ -1,9 +1,6 @@
 package whisper
 
-import (
-	"math"
-	"testing"
-)
+import "testing"
 
 func TestComputeMelFilterbank(t *testing.T) {
 	nMels := 80
@@ -42,53 +39,37 @@ func TestComputeMelFilterbank(t *testing.T) {
 }
 
 func TestComputeMelSpectrogram(t *testing.T) {
-	nSamples := whisperSampleRate
-	samples := make([]float32, nSamples)
-	for i := range samples {
-		samples[i] = float32(math.Sin(2 * math.Pi * 440 * float64(i) / float64(whisperSampleRate)))
-	}
-
 	nMels := 80
 	filters := computeMelFilterbank(nMels, whisperNFFT, whisperSampleRate)
 	sparse := buildSparseFilters(filters, nMels, whisperFreqBins)
-	mel, totalFrames := computeMelSpectrogram(samples, nMels, sparse)
 
-	expectedLen := nMels * totalFrames
-	if len(mel) != expectedLen {
-		t.Fatalf("mel spectrogram length: got %d, want %d (nMels=%d, frames=%d)", len(mel), expectedLen, nMels, totalFrames)
-	}
+	t.Run("1s", func(t *testing.T) {
+		mel, totalFrames := computeMelSpectrogram(makeSineWave(440, whisperSampleRate, 1.0), nMels, sparse)
 
-	if totalFrames <= 0 {
-		t.Fatalf("expected positive frame count, got %d", totalFrames)
-	}
-
-	for i, v := range mel {
-		if v < -2 || v > 2 {
-			t.Errorf("mel[%d] = %f, out of expected range [-2, 2]", i, v)
-			break
+		if totalFrames <= 0 {
+			t.Fatalf("expected positive frame count, got %d", totalFrames)
 		}
-	}
-}
+		if len(mel) != nMels*totalFrames {
+			t.Fatalf("mel spectrogram length: got %d, want %d (nMels=%d, frames=%d)", len(mel), nMels*totalFrames, nMels, totalFrames)
+		}
+		for i, v := range mel {
+			if v < -2 || v > 2 {
+				t.Errorf("mel[%d] = %f, out of expected range [-2, 2]", i, v)
+				break
+			}
+		}
+	})
 
-func TestComputeMelSpectrogram30s(t *testing.T) {
-	nSamples := whisperSampleRate * whisperChunkLen
-	samples := make([]float32, nSamples)
-	for i := range samples {
-		samples[i] = float32(math.Sin(2 * math.Pi * 440 * float64(i) / float64(whisperSampleRate)))
-	}
+	t.Run("30s", func(t *testing.T) {
+		mel, totalFrames := computeMelSpectrogram(makeSineWave(440, whisperSampleRate, float64(whisperChunkLen)), nMels, sparse)
 
-	nMels := 80
-	filters := computeMelFilterbank(nMels, whisperNFFT, whisperSampleRate)
-	sparse := buildSparseFilters(filters, nMels, whisperFreqBins)
-	mel, totalFrames := computeMelSpectrogram(samples, nMels, sparse)
-
-	if totalFrames < whisperNFrames {
-		t.Errorf("30s audio should produce at least %d frames, got %d", whisperNFrames, totalFrames)
-	}
-
-	if len(mel) != nMels*totalFrames {
-		t.Fatalf("mel length mismatch: got %d, want %d", len(mel), nMels*totalFrames)
-	}
+		if totalFrames < whisperNFrames {
+			t.Errorf("30s audio should produce at least %d frames, got %d", whisperNFrames, totalFrames)
+		}
+		if len(mel) != nMels*totalFrames {
+			t.Fatalf("mel length mismatch: got %d, want %d", len(mel), nMels*totalFrames)
+		}
+	})
 }
 
 func TestExtractMelWindow(t *testing.T) {
@@ -158,10 +139,7 @@ func BenchmarkComputeMelSpectrogram(b *testing.B) {
 	sparse := buildSparseFilters(filters, 80, whisperFreqBins)
 
 	b.Run("1s", func(b *testing.B) {
-		samples := make([]float32, whisperSampleRate)
-		for i := range samples {
-			samples[i] = float32(math.Sin(2 * math.Pi * 440 * float64(i) / float64(whisperSampleRate)))
-		}
+		samples := makeSineWave(440, whisperSampleRate, 1.0)
 		b.ResetTimer()
 		for b.Loop() {
 			computeMelSpectrogram(samples, 80, sparse)
@@ -169,10 +147,7 @@ func BenchmarkComputeMelSpectrogram(b *testing.B) {
 	})
 
 	b.Run("30s", func(b *testing.B) {
-		samples := make([]float32, whisperSampleRate*whisperChunkLen)
-		for i := range samples {
-			samples[i] = float32(math.Sin(2 * math.Pi * 440 * float64(i) / float64(whisperSampleRate)))
-		}
+		samples := makeSineWave(440, whisperSampleRate, float64(whisperChunkLen))
 		b.ResetTimer()
 		for b.Loop() {
 			computeMelSpectrogram(samples, 80, sparse)

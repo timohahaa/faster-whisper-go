@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-func TestHannWindow(t *testing.T) {
+func TestMakeHannWindow(t *testing.T) {
 	t.Run("Properties", func(t *testing.T) {
 		n := 400
 		w := makeHannWindow(n)
@@ -60,7 +60,7 @@ func TestHannWindow(t *testing.T) {
 	})
 }
 
-func TestStft(t *testing.T) {
+func TestSTFT(t *testing.T) {
 	t.Run("Silence", func(t *testing.T) {
 		samples := make([]float32, whisperSampleRate)
 		power, nFrames := stft(samples, whisperNFFT, whisperHopLength, 0)
@@ -86,12 +86,7 @@ func TestStft(t *testing.T) {
 	})
 
 	t.Run("SineWavePeak", func(t *testing.T) {
-		freq := 1000.0
-		nSamples := whisperSampleRate
-		samples := make([]float32, nSamples)
-		for i := range samples {
-			samples[i] = float32(math.Sin(2 * math.Pi * freq * float64(i) / float64(whisperSampleRate)))
-		}
+		samples := makeSineWave(1000, whisperSampleRate, 1.0)
 
 		power, nFrames := stft(samples, whisperNFFT, whisperHopLength, 0)
 		if nFrames == 0 {
@@ -129,12 +124,9 @@ func TestStft(t *testing.T) {
 	})
 }
 
-func BenchmarkStft(b *testing.B) {
+func BenchmarkSTFT(b *testing.B) {
 	b.Run("1s", func(b *testing.B) {
-		samples := make([]float32, whisperSampleRate)
-		for i := range samples {
-			samples[i] = float32(math.Sin(2 * math.Pi * 440 * float64(i) / float64(whisperSampleRate)))
-		}
+		samples := makeSineWave(440, whisperSampleRate, 1.0)
 		b.ResetTimer()
 		for b.Loop() {
 			stft(samples, whisperNFFT, whisperHopLength, 0)
@@ -142,10 +134,7 @@ func BenchmarkStft(b *testing.B) {
 	})
 
 	b.Run("30s", func(b *testing.B) {
-		samples := make([]float32, whisperSampleRate*whisperChunkLen)
-		for i := range samples {
-			samples[i] = float32(math.Sin(2 * math.Pi * 440 * float64(i) / float64(whisperSampleRate)))
-		}
+		samples := makeSineWave(440, whisperSampleRate, float64(whisperChunkLen))
 		b.ResetTimer()
 		for b.Loop() {
 			stft(samples, whisperNFFT, whisperHopLength, 0)

@@ -44,9 +44,26 @@ func TestPadOrTrim(t *testing.T) {
 	})
 }
 
-func TestSecToDuration(t *testing.T) {
-	d := secToDuration(1.5)
-	if d.Seconds() != 1.5 {
-		t.Errorf("secToDuration(1.5) = %v, want 1.5s", d)
-	}
+func TestGetCompressionRatio(t *testing.T) {
+	t.Run("Empty", func(t *testing.T) {
+		if r := getCompressionRatio(""); r != 0 {
+			t.Errorf("empty: got %f, want 0", r)
+		}
+	})
+
+	t.Run("Normal", func(t *testing.T) {
+		r := getCompressionRatio("Hello, this is a normal sentence with some text.")
+		if r <= 0 {
+			t.Errorf("normal text: got %f, want > 0", r)
+		}
+	})
+
+	t.Run("Repetitive", func(t *testing.T) {
+		normal := getCompressionRatio("Hello, this is a normal sentence.")
+		repeated := getCompressionRatio("Hello Hello Hello Hello Hello Hello Hello Hello Hello Hello Hello Hello Hello Hello Hello Hello")
+		if repeated <= normal {
+			t.Errorf("repetitive text (%f) should have higher ratio than normal (%f)", repeated, normal)
+		}
+	})
 }
+
