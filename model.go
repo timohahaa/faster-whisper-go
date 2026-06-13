@@ -25,7 +25,14 @@ func Load(modelDir string, cfg ModelConfig) (*Model, error) {
 		computeType = "default"
 	}
 
-	bridge, err := ct2bridge.Load(modelDir, device, computeType)
+	bridge, err := ct2bridge.Load(
+		modelDir,
+		device,
+		computeType,
+		cfg.DeviceIndex,
+		cfg.CPUThreads,
+		cfg.NumWorkers,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("load ct2 model: %w", err)
 	}

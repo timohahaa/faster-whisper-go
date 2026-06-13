@@ -18,7 +18,7 @@ type Model struct {
 }
 
 // Load opens a Whisper model from a CTranslate2 model directory.
-func Load(path, device, computeType string) (*Model, error) {
+func Load(path, device, computeType string, deviceIndex []int, intraThreads, interThreads int) (*Model, error) {
 	cPath := C.CString(path)
 	defer C.free(unsafe.Pointer(cPath))
 
@@ -28,8 +28,21 @@ func Load(path, device, computeType string) (*Model, error) {
 	cComputeType := C.CString(computeType)
 	defer C.free(unsafe.Pointer(cComputeType))
 
+	var devIdxPtr *C.int
+	var cDevIdx []C.int
+	if len(deviceIndex) > 0 {
+		cDevIdx = make([]C.int, len(deviceIndex))
+		for i, v := range deviceIndex {
+			cDevIdx[i] = C.int(v)
+		}
+		devIdxPtr = &cDevIdx[0]
+	}
+
 	var cErr *C.char
-	ptr := C.ct2_model_load(cPath, cDevice, cComputeType, &cErr)
+	ptr := C.ct2_model_load(cPath, cDevice, cComputeType,
+		devIdxPtr, C.size_t(len(deviceIndex)),
+		C.int(intraThreads), C.int(interThreads),
+		&cErr)
 	if ptr == nil {
 		err := errors.New(C.GoString(cErr))
 		C.free(unsafe.Pointer(cErr))

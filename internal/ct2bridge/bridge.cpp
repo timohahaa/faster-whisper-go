@@ -7,6 +7,7 @@
 #include <vector>
 
 #include <ctranslate2/models/whisper.h>
+#include <ctranslate2/replica_pool.h>
 #include <ctranslate2/storage_view.h>
 
 struct ct2_model {
@@ -76,6 +77,8 @@ extern "C" {
 
 ct2_model* ct2_model_load(
     const char* path, const char* device, const char* compute_type,
+    const int* device_index, size_t device_index_count,
+    int intra_threads, int inter_threads,
     char** error_out) {
     if (path == nullptr || path[0] == '\0') {
         set_error_out(error_out, "model path is required");
@@ -83,11 +86,38 @@ ct2_model* ct2_model_load(
     }
 
     try {
+        std::vector<int> dev_indices;
+        if (device_index != nullptr && device_index_count > 0) {
+            dev_indices.assign(device_index, device_index + device_index_count);
+        } else {
+            dev_indices = {0};
+        }
+
+        // inter_threads > 1 means multiple replicas per device.
+        // CTranslate2 maps one replica per device_index entry,
+        // so we repeat each index to get the desired replica count.
+        if (inter_threads > 1) {
+            std::vector<int> expanded;
+            expanded.reserve(dev_indices.size() * inter_threads);
+            for (int idx : dev_indices) {
+                for (int r = 0; r < inter_threads; ++r) {
+                    expanded.push_back(idx);
+                }
+            }
+            dev_indices = std::move(expanded);
+        }
+
+        ctranslate2::ReplicaPoolConfig pool_config;
+        if (intra_threads > 0) pool_config.num_threads_per_replica = intra_threads;
+
         auto model = std::make_unique<ct2_model>();
         model->whisper = std::make_unique<ctranslate2::models::Whisper>(
             path,
             parse_device(device),
-            parse_compute_type(compute_type));
+            parse_compute_type(compute_type),
+            dev_indices,
+            /*tensor_parallel=*/false,
+            pool_config);
         return model.release();
     } catch (const std::exception& e) {
         set_error_out(error_out, e.what());

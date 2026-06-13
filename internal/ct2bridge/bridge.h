@@ -26,6 +26,8 @@ typedef struct {
 } ct2_detect_result;
 
 ct2_model* ct2_model_load(const char* path, const char* device, const char* compute_type,
+    const int* device_index, size_t device_index_count,
+    int intra_threads, int inter_threads,
     char** error_out);
 void ct2_model_free(ct2_model* m);
 bool ct2_model_is_multilingual(ct2_model* m);

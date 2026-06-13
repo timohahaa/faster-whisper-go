@@ -4,6 +4,9 @@ package whisper
 type ModelConfig struct {
 	Device      string // "cpu" or "cuda"
 	ComputeType string // "int8", "float16", "float32", "default"
+	DeviceIndex []int  // GPU device IDs to use; nil/empty defaults to [0]
+	CPUThreads  int    // threads per replica (intra_threads); 0 = CTranslate2 default (4)
+	NumWorkers  int    // number of replicas (inter_threads); 0 = 1
 }
 
 // DefaultModelConfig returns sensible defaults for CPU inference.
