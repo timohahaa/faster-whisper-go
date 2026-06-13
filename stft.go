@@ -26,17 +26,6 @@ func makeHannWindow(n int) []float64 {
 	return w
 }
 
-// hannWindow returns a periodic Hann window of length n.
-// The window suppresses spectral leakage at frame boundaries: without it,
-// abrupt signal cutoffs at frame edges produce spurious high-frequency components.
-// Formula: w(i) = 0.5 * (1 - cos(2*pi*i / n)).
-func hannWindow(n int) []float64 {
-	if n == whisperNFFT {
-		return whisperHannWindow
-	}
-	return makeHannWindow(n)
-}
-
 // stft computes the Short-Time Fourier Transform.
 // Returns magnitudes squared (power spectrum) as a flat slice of length
 // nFrames * freqBins (row-major, frame-major), plus the frame count.
@@ -55,7 +44,7 @@ func stft(samples []float32, nFFT, hopLength int) (power []float64, nFrames int)
 		padded[padLen+i] = float64(s)
 	}
 
-	window := hannWindow(nFFT)
+	window := whisperHannWindow
 	freqBins := nFFT/2 + 1
 	nFrames = (paddedLen - nFFT) / hopLength + 1
 

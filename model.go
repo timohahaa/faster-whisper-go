@@ -38,7 +38,8 @@ func Load(modelDir string, cfg ModelConfig) (*Model, error) {
 
 	nMels := bridge.NMels()
 	if nMels == 0 {
-		nMels = 80
+		bridge.Close()
+		return nil, fmt.Errorf("model reports 0 mel frequency bins")
 	}
 
 	return &Model{

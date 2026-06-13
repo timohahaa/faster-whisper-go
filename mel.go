@@ -9,8 +9,7 @@ const (
 	// sampleRate * chunkLen / hopLength = 16000 * 30 / 160 = 3000.
 	whisperNFrames = 3000
 
-	framesPerSecond = whisperSampleRate / whisperHopLength // 100
-	timePerFrame    = float64(whisperHopLength) / float64(whisperSampleRate)
+	timePerFrame = float64(whisperHopLength) / float64(whisperSampleRate)
 	// inputStride is the encoder's temporal downsampling factor (conv layers reduce frames by 2x).
 	inputStride = 2
 )
@@ -39,11 +38,9 @@ func computeMelFilterbank(nMels, nFFT, sampleRate int) []float32 {
 	logstep := math.Log(6.4) / 27.0
 
 	nPoints := nMels + 2
-	mels := make([]float64, nPoints)
 	freqs := make([]float64, nPoints)
 	for i := range nPoints {
 		m := minMel + float64(i)*(maxMel-minMel)/float64(nPoints-1)
-		mels[i] = m
 		if m < minLogMel {
 			freqs[i] = fMin + fSp*m
 		} else {
@@ -85,6 +82,7 @@ func computeMelSpectrogram(samples []float32, nMels int, filters []float32) ([]f
 	copy(padded, samples)
 
 	power, rawFrames := stft(padded, whisperNFFT, whisperHopLength)
+	// Drop the last frame to match Python's magnitudes = np.abs(stft[..., :-1]) ** 2.
 	stftFrames := rawFrames - 1
 	freqBins := whisperFreqBins
 

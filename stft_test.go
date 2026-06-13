@@ -8,7 +8,7 @@ import (
 func TestHannWindow(t *testing.T) {
 	t.Run("Properties", func(t *testing.T) {
 		n := 400
-		w := hannWindow(n)
+		w := makeHannWindow(n)
 		if len(w) != n {
 			t.Fatalf("hannWindow(%d) length = %d, want %d", n, len(w), n)
 		}
@@ -39,7 +39,7 @@ func TestHannWindow(t *testing.T) {
 	})
 
 	t.Run("ExactN4", func(t *testing.T) {
-		w := hannWindow(4)
+		w := makeHannWindow(4)
 		if len(w) != 4 {
 			t.Fatalf("length = %d, want 4", len(w))
 		}
@@ -52,10 +52,10 @@ func TestHannWindow(t *testing.T) {
 	})
 
 	t.Run("Cached", func(t *testing.T) {
-		w1 := hannWindow(whisperNFFT)
-		w2 := hannWindow(whisperNFFT)
+		w1 := whisperHannWindow
+		w2 := whisperHannWindow
 		if &w1[0] != &w2[0] {
-			t.Error("hannWindow(whisperNFFT) should return cached slice")
+			t.Error("whisperHannWindow should be a single shared slice")
 		}
 	})
 }

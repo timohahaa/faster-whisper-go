@@ -2,7 +2,7 @@ package whisper
 
 import (
 	"bytes"
-	"compress/flate"
+	"compress/zlib"
 	"context"
 	"errors"
 	"math"
@@ -162,10 +162,6 @@ func (m *Model) detectLanguageFromMel(mel []float32, totalFrames, seekOffset int
 	}
 	defer enc.Free()
 
-	return m.detectLanguageFromEncoded(enc)
-}
-
-func (m *Model) detectLanguageFromEncoded(enc *ct2bridge.EncoderOutput) (string, float32, error) {
 	result, err := m.bridge.DetectLanguage(enc)
 	if err != nil {
 		return "", 0, err
@@ -208,8 +204,8 @@ func (m *Model) processWindow(p processWindowParams) (windowResult, error) {
 
 	lang := p.lang
 	if p.cfg.Multilingual && m.IsMultilingual() {
-		if detectedLang, _, dlErr := m.detectLanguageFromEncoded(enc); dlErr == nil {
-			lang = detectedLang
+		if result, dlErr := m.bridge.DetectLanguage(enc); dlErr == nil {
+			lang = result.Language
 		}
 	}
 
@@ -322,8 +318,8 @@ func (m *Model) generateWithFallback(
 	cfg TranscribeConfig,
 	suppressTokens []int32,
 ) (ct2bridge.GenerateResult, float32, float32, float32, error) {
-	var allResults []fallbackResult
-	var belowCRResults []fallbackResult
+	var best *fallbackResult
+	var bestBelowCR *fallbackResult
 
 	maxInitialTSIdx := int(math.Round(float64(cfg.MaxInitialTimestamp) / timePrecision))
 
@@ -356,8 +352,9 @@ func (m *Model) generateWithFallback(
 		}
 
 		var avgLogProb float32
-		if len(genResult.SequenceIDs) > 0 {
-			avgLogProb = genResult.Score
+		if seqLen := len(genResult.SequenceIDs); seqLen > 0 {
+			cumLogProb := genResult.Score * float32(math.Pow(float64(seqLen), float64(cfg.LengthPenalty)))
+			avgLogProb = cumLogProb / float32(seqLen+1)
 		}
 
 		text := m.tokenizer.Decode(genResult.SequenceIDs)
@@ -369,25 +366,26 @@ func (m *Model) generateWithFallback(
 			temperature:      temp,
 			compressionRatio: compressionRatio,
 		}
-		allResults = append(allResults, fr)
 
 		needsFallback := false
 
 		if cfg.CompressionRatioThreshold > 0 && compressionRatio > cfg.CompressionRatioThreshold {
 			needsFallback = true
 		} else {
-			belowCRResults = append(belowCRResults, fr)
+			if bestBelowCR == nil || fr.avgLogProb > bestBelowCR.avgLogProb {
+				bestBelowCR = &fr
+			}
 		}
 
-		if cfg.LogProbThreshold != 0 && avgLogProb < cfg.LogProbThreshold {
-			needsFallback = true
+		if cfg.LogProbThreshold != nil && avgLogProb < *cfg.LogProbThreshold {
+			isNoSpeech := cfg.NoSpeechThreshold > 0 && genResult.NoSpeechProb > cfg.NoSpeechThreshold
+			if !isNoSpeech {
+				needsFallback = true
+			}
 		}
 
-		if cfg.NoSpeechThreshold > 0 &&
-			genResult.NoSpeechProb > cfg.NoSpeechThreshold &&
-			cfg.LogProbThreshold != 0 &&
-			avgLogProb < cfg.LogProbThreshold {
-			needsFallback = false
+		if best == nil || fr.avgLogProb > best.avgLogProb {
+			best = &fr
 		}
 
 		if !needsFallback {
@@ -395,29 +393,24 @@ func (m *Model) generateWithFallback(
 		}
 	}
 
-	candidates := belowCRResults
-	if len(candidates) == 0 {
-		candidates = allResults
+	pick := bestBelowCR
+	if pick == nil {
+		pick = best
 	}
-	best := candidates[0]
-	for _, c := range candidates[1:] {
-		if c.avgLogProb > best.avgLogProb {
-			best = c
-		}
-	}
-
-	return best.genResult, best.avgLogProb, cfg.Temperature[len(cfg.Temperature)-1], best.compressionRatio, nil
+	return pick.genResult, pick.avgLogProb, pick.temperature, pick.compressionRatio, nil
 }
 
 func shouldSkipSegment(genResult ct2bridge.GenerateResult, avgLogProb float32, cfg TranscribeConfig) bool {
 	if cfg.NoSpeechThreshold <= 0 {
 		return false
 	}
-	shouldSkip := genResult.NoSpeechProb > cfg.NoSpeechThreshold
-	if cfg.LogProbThreshold != 0 && avgLogProb > cfg.LogProbThreshold {
-		shouldSkip = false
+	if genResult.NoSpeechProb <= cfg.NoSpeechThreshold {
+		return false
 	}
-	return shouldSkip
+	if cfg.LogProbThreshold != nil && avgLogProb > *cfg.LogProbThreshold {
+		return false
+	}
+	return true
 }
 
 func getCompressionRatio(text string) float32 {
@@ -426,17 +419,13 @@ func getCompressionRatio(text string) float32 {
 		return 0
 	}
 	var buf bytes.Buffer
-	w, err := flate.NewWriter(&buf, flate.DefaultCompression)
-	if err != nil {
-		return 0
-	}
+	w := zlib.NewWriter(&buf)
 	w.Write(raw)
 	w.Close()
-	compressed := buf.Len()
-	if compressed == 0 {
+	if buf.Len() == 0 {
 		return 0
 	}
-	return float32(len(raw)) / float32(compressed)
+	return float32(len(raw)) / float32(buf.Len())
 }
 
 func padOrTrim(samples []float32, length int) []float32 {

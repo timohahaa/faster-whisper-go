@@ -59,8 +59,8 @@ func TestDefaultTranscribeConfig(t *testing.T) {
 	if cfg.CompressionRatioThreshold != 2.4 {
 		t.Errorf("CompressionRatioThreshold: got %f, want 2.4", cfg.CompressionRatioThreshold)
 	}
-	if cfg.LogProbThreshold != -1.0 {
-		t.Errorf("LogProbThreshold: got %f, want -1.0", cfg.LogProbThreshold)
+	if cfg.LogProbThreshold == nil || *cfg.LogProbThreshold != -1.0 {
+		t.Errorf("LogProbThreshold: got %v, want -1.0", cfg.LogProbThreshold)
 	}
 	if cfg.NoSpeechThreshold != 0.6 {
 		t.Errorf("NoSpeechThreshold: got %f, want 0.6", cfg.NoSpeechThreshold)

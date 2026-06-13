@@ -34,16 +34,10 @@ type tokenizer struct {
 	idToToken       map[int32]string
 	tokenToID       map[string]int32
 	langToToken     map[string]int32
-	merges          []bpeMerge
 	mergeRank       map[string]int
 	byteDecoder     [512]byte
-	byteDecoderHigh map[rune]byte
 	byteEncoder     map[byte]rune
 	nonSpeechTokens []int32
-}
-
-type bpeMerge struct {
-	a, b string
 }
 
 // loadTokenizer parses tokenizer.json from a model directory.
@@ -89,17 +83,11 @@ func loadTokenizer(modelDir string) (*tokenizer, error) {
 		}
 	}
 
-	t.merges = make([]bpeMerge, 0, len(raw.Model.Merges))
-	for _, m := range raw.Model.Merges {
-		parts := strings.SplitN(m, " ", 2)
-		if len(parts) == 2 {
-			t.merges = append(t.merges, bpeMerge{a: parts[0], b: parts[1]})
+	t.mergeRank = make(map[string]int, len(raw.Model.Merges))
+	for i, m := range raw.Model.Merges {
+		if _, ok := t.mergeRank[m]; !ok {
+			t.mergeRank[m] = i
 		}
-	}
-
-	t.mergeRank = make(map[string]int, len(t.merges))
-	for i, m := range t.merges {
-		t.mergeRank[m.a+" "+m.b] = i
 	}
 
 	return t, nil
@@ -171,7 +159,7 @@ func (t *tokenizer) bpeEncode(word string) []int32 {
 
 	for len(symbols) > 1 {
 		bestIdx := -1
-		bestRank := len(t.merges)
+		bestRank := len(t.mergeRank)
 
 		for i := 0; i < len(symbols)-1; i++ {
 			pair := symbols[i] + " " + symbols[i+1]
@@ -233,7 +221,9 @@ func (t *tokenizer) NonSpeechTokens() []int32 {
 		resultSet[quoteTokens[0]] = true
 	}
 
-	allSymbols := append(symbols, multiSymbols...)
+	allSymbols := make([]string, 0, len(symbols)+len(multiSymbols)+len(miscellaneous))
+	allSymbols = append(allSymbols, symbols...)
+	allSymbols = append(allSymbols, multiSymbols...)
 	for _, r := range miscellaneous {
 		allSymbols = append(allSymbols, string(r))
 	}
@@ -383,21 +373,6 @@ func (t *tokenizer) SplitSegmentsByTimestamps(
 
 const timePrecision = 0.02
 
-// IsTimestamp reports whether a token ID is a timestamp token.
-func (t *tokenizer) IsTimestamp(id int32) bool {
-	return id >= tokenTimestampBeg
-}
-
-// TimestampValue returns the time in seconds for a timestamp token.
-func (t *tokenizer) TimestampValue(id int32) float64 {
-	return float64(id-tokenTimestampBeg) * timePrecision
-}
-
-// IsSpecial reports whether a token ID is a special (non-text) token.
-func (t *tokenizer) IsSpecial(id int32) bool {
-	return id >= tokenEOT
-}
-
 // LanguageToken returns the token ID for a language code, or -1 if not found.
 func (t *tokenizer) LanguageToken(lang string) int32 {
 	if id, ok := t.langToToken[lang]; ok {
@@ -445,13 +420,9 @@ func (t *tokenizer) decodeTokenInto(buf *strings.Builder, token string) {
 				continue
 			}
 		}
-		if b, ok := t.byteDecoderHigh[r]; ok {
-			buf.WriteByte(b)
-		} else {
-			var tmp [utf8.UTFMax]byte
-			n := utf8.EncodeRune(tmp[:], r)
-			buf.Write(tmp[:n])
-		}
+		var tmp [utf8.UTFMax]byte
+		n := utf8.EncodeRune(tmp[:], r)
+		buf.Write(tmp[:n])
 	}
 }
 
@@ -464,26 +435,7 @@ func buildByteEncoder(t *tokenizer) map[byte]rune {
 			enc[b] = rune(i)
 		}
 	}
-	for r, b := range t.byteDecoderHigh {
-		enc[b] = r
-	}
 	return enc
-}
-
-// buildByteDecoder builds a byte decoder and returns it as a map (for tests).
-func buildByteDecoder() map[rune]byte {
-	t := &tokenizer{}
-	buildByteDecoderInto(t)
-	result := make(map[rune]byte, 256)
-	for i, b := range t.byteDecoder {
-		if b != 0 || i == 0 {
-			result[rune(i)] = b
-		}
-	}
-	for r, b := range t.byteDecoderHigh {
-		result[r] = b
-	}
-	return result
 }
 
 // buildByteDecoderInto populates the tokenizer's byte decoder fields.
@@ -511,16 +463,10 @@ func buildByteDecoderInto(t *tokenizer) {
 		t.byteDecoder[i] = byte(i)
 	}
 
-	t.byteDecoderHigh = make(map[rune]byte)
 	n := 0
 	for i := range 256 {
 		if !isSafe[i] {
-			r := rune(256 + n)
-			if int(r) < len(t.byteDecoder) {
-				t.byteDecoder[r] = byte(i)
-			} else {
-				t.byteDecoderHigh[r] = byte(i)
-			}
+			t.byteDecoder[256+n] = byte(i)
 			n++
 		}
 	}

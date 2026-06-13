@@ -46,6 +46,18 @@ func makeTestTokenizer() *tokenizer {
 	return t
 }
 
+func buildByteDecoder() map[rune]byte {
+	t := &tokenizer{}
+	buildByteDecoderInto(t)
+	result := make(map[rune]byte, 256)
+	for i, b := range t.byteDecoder {
+		if b != 0 || i == 0 {
+			result[rune(i)] = b
+		}
+	}
+	return result
+}
+
 func TestBuildByteDecoder(t *testing.T) {
 	dec := buildByteDecoder()
 	if len(dec) != 256 {
@@ -95,25 +107,6 @@ func TestIsLangToken(t *testing.T) {
 	for _, tt := range tests {
 		if got := isLangToken(tt.input); got != tt.want {
 			t.Errorf("isLangToken(%q) = %v, want %v", tt.input, got, tt.want)
-		}
-	}
-}
-
-func TestTokenizerTimestampValue(t *testing.T) {
-	tok := makeTestTokenizer()
-	tests := []struct {
-		id   int32
-		want float64
-	}{
-		{tokenTimestampBeg, 0.0},
-		{tokenTimestampBeg + 1, 0.02},
-		{tokenTimestampBeg + 50, 1.0},
-		{tokenTimestampBeg + 1500, 30.0},
-	}
-	for _, tt := range tests {
-		got := tok.TimestampValue(tt.id)
-		if diff := got - tt.want; diff > 1e-9 || diff < -1e-9 {
-			t.Errorf("TimestampValue(%d) = %f, want %f", tt.id, got, tt.want)
 		}
 	}
 }

@@ -31,9 +31,9 @@ type TranscribeConfig struct {
 	// nil uses the default chain [0.0, 0.2, 0.4, 0.6, 0.8, 1.0].
 	Temperature []float32
 
-	CompressionRatioThreshold float32 // default 2.4
-	LogProbThreshold          float32 // default -1.0
-	NoSpeechThreshold         float32 // default 0.6
+	CompressionRatioThreshold float32   // default 2.4
+	LogProbThreshold          *float32 // default -1.0; nil disables the check
+	NoSpeechThreshold         float32  // default 0.6
 
 	// InitialPrompt is optional text to provide as context for the first window.
 	InitialPrompt string
@@ -75,7 +75,7 @@ func DefaultTranscribeConfig() TranscribeConfig {
 		BestOf:                    5,
 		Temperature:               []float32{0, 0.2, 0.4, 0.6, 0.8, 1.0},
 		CompressionRatioThreshold: 2.4,
-		LogProbThreshold:          -1.0,
+		LogProbThreshold:          ptrFloat32(-1.0),
 		NoSpeechThreshold:         0.6,
 		PromptResetOnTemperature:  0.5,
 		SuppressBlank:             true,
@@ -88,3 +88,5 @@ func DefaultTranscribeConfig() TranscribeConfig {
 		ConditionOnPreviousText:   true,
 	}
 }
+
+func ptrFloat32(v float32) *float32 { return &v }
