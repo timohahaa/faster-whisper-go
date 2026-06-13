@@ -9,7 +9,8 @@ const (
 	// sampleRate * chunkLen / hopLength = 16000 * 30 / 160 = 3000.
 	whisperNFrames = 3000
 
-	timePerFrame = float64(whisperHopLength) / float64(whisperSampleRate)
+	timePerFrame      = float64(whisperHopLength) / float64(whisperSampleRate)
+	framesPerSecond   = float64(whisperSampleRate) / float64(whisperHopLength)
 	// inputStride is the encoder's temporal downsampling factor (conv layers reduce frames by 2x).
 	inputStride = 2
 )

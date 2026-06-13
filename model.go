@@ -12,6 +12,7 @@ type Model struct {
 	tokenizer     *tokenizer
 	nMels         int
 	sparseFilters []melFilterSpan
+	isMultilingual bool
 }
 
 // Load opens a Whisper model. modelSizeOrPath is either a known model size
@@ -61,10 +62,11 @@ func Load(modelSizeOrPath string, cfg ModelConfig) (*Model, error) {
 	sparse := buildSparseFilters(dense, nMels, whisperFreqBins)
 
 	return &Model{
-		bridge:        bridge,
-		tokenizer:     tok,
-		nMels:         nMels,
-		sparseFilters: sparse,
+		bridge:         bridge,
+		tokenizer:      tok,
+		nMels:          nMels,
+		sparseFilters:  sparse,
+		isMultilingual: bridge.IsMultilingual(),
 	}, nil
 }
 
@@ -81,8 +83,8 @@ func (m *Model) Close() {
 
 // IsMultilingual reports whether the model supports multiple languages.
 func (m *Model) IsMultilingual() bool {
-	if m == nil || m.bridge == nil {
+	if m == nil {
 		return false
 	}
-	return m.bridge.IsMultilingual()
+	return m.isMultilingual
 }

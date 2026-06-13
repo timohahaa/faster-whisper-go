@@ -1,57 +1,5 @@
 package whisper
 
-import "math"
-
-// VadConfig controls Voice Activity Detection parameters.
-// Zero-value fields are filled with sensible defaults
-type VadConfig struct {
-	// Threshold is the speech probability threshold. Probabilities above this
-	// value are considered speech. Default: 0.5.
-	Threshold float32
-	// NegThreshold is the silence threshold for end-of-speech detection.
-	// 0 means auto-compute as max(Threshold-0.15, 0.01).
-	NegThreshold float32
-	// MinSpeechDurationMs: speech chunks shorter than this are discarded. Default: 0.
-	MinSpeechDurationMs int
-	// MaxSpeechDurationS: chunks longer than this are split at the best silence point.
-	// Default: +Inf (no limit).
-	MaxSpeechDurationS float64
-	// MinSilenceDurationMs: minimum silence duration to split speech chunks. Default: 2000.
-	MinSilenceDurationMs int
-	// SpeechPadMs: padding added to each side of a speech chunk. Default: 400.
-	SpeechPadMs int
-	// MinSilenceAtMaxSpeech: minimum silence (ms) used to find split points when
-	// MaxSpeechDurationS is reached. Default: 98.
-	MinSilenceAtMaxSpeech int
-	// UseMaxPossSilAtMaxSpeech: when true, split at the longest silence found
-	// (not just the last one). Default: true.
-	UseMaxPossSilAtMaxSpeech *bool
-}
-
-func (c *VadConfig) applyDefaults() {
-	if c.Threshold == 0 {
-		c.Threshold = 0.5
-	}
-	if c.NegThreshold == 0 {
-		c.NegThreshold = float32(math.Max(float64(c.Threshold)-0.15, 0.01))
-	}
-	if c.MaxSpeechDurationS == 0 {
-		c.MaxSpeechDurationS = math.Inf(1)
-	}
-	if c.MinSilenceDurationMs == 0 {
-		c.MinSilenceDurationMs = 2000
-	}
-	if c.SpeechPadMs == 0 {
-		c.SpeechPadMs = 400
-	}
-	if c.MinSilenceAtMaxSpeech == 0 {
-		c.MinSilenceAtMaxSpeech = 98
-	}
-	if c.UseMaxPossSilAtMaxSpeech == nil {
-		c.UseMaxPossSilAtMaxSpeech = ptrBool(true)
-	}
-}
-
 // ModelConfig controls model loading parameters.
 type ModelConfig struct {
 	Device      string // "cpu" or "cuda"
@@ -219,24 +167,8 @@ func (c *TranscribeConfig) applyDefaults() {
 // DefaultTranscribeConfig returns sensible defaults for transcription.
 // Using this function is optional -- unset fields are filled automatically.
 func DefaultTranscribeConfig() TranscribeConfig {
-	return TranscribeConfig{
-		BeamSize:                  5,
-		BestOf:                    5,
-		Temperature:               []float32{0, 0.2, 0.4, 0.6, 0.8, 1.0},
-		CompressionRatioThreshold: ptrFloat32(2.4),
-		LogProbThreshold:          ptrFloat32(-1.0),
-		NoSpeechThreshold:         ptrFloat32(0.6),
-		PromptResetOnTemperature:  ptrFloat32(0.5),
-		SuppressBlank:             ptrBool(true),
-		SuppressTokens:            []int32{-1},
-		Patience:                  ptrFloat32(1.0),
-		LengthPenalty:             ptrFloat32(1.0),
-		RepetitionPenalty:         ptrFloat32(1.0),
-		NoRepeatNgramSize:         0,
-		MaxInitialTimestamp:       ptrFloat32(1.0),
-		ConditionOnPreviousText:   ptrBool(true),
-	}
+	var cfg TranscribeConfig
+	cfg.applyDefaults()
+	return cfg
 }
 
-func ptrFloat32(v float32) *float32 { return &v }
-func ptrBool(v bool) *bool          { return &v }
