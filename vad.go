@@ -251,6 +251,79 @@ func getSpeechProbs(samples []float32) []float32 {
 	return probs
 }
 
+// chunkMetadata tracks the origin of a batched audio chunk for timestamp restoration.
+type chunkMetadata struct {
+	offset   float64       // seconds from start of original audio
+	duration float64       // seconds of speech in this chunk
+	segments []SpeechChunk // original VAD segments composing this chunk
+}
+
+// collectChunksBatched groups speech chunks into audio segments of at most
+// maxDuration seconds. Returns the audio buffers and their metadata.
+// This is a port of Python's collect_chunks with max_duration.
+func collectChunksBatched(samples []float32, chunks []SpeechChunk, maxDuration float64) ([][]float32, []chunkMetadata) {
+	if len(chunks) == 0 {
+		return [][]float32{{}}, []chunkMetadata{{}}
+	}
+
+	maxSamples := maxDuration * whisperSampleRate
+
+	var audioChunks [][]float32
+	var metadata []chunkMetadata
+
+	var currentAudio []float32
+	var currentSegments []SpeechChunk
+	var currentDuration float64
+	var totalDuration float64
+
+	for _, chunk := range chunks {
+		chunkLen := float64(chunk.End - chunk.Start)
+
+		if currentDuration+chunkLen > maxSamples {
+			audioChunks = append(audioChunks, currentAudio)
+			metadata = append(metadata, chunkMetadata{
+				offset:   totalDuration / whisperSampleRate,
+				duration: currentDuration / whisperSampleRate,
+				segments: currentSegments,
+			})
+			totalDuration += currentDuration
+
+			start := chunk.Start
+			end := chunk.End
+			if start > len(samples) {
+				start = len(samples)
+			}
+			if end > len(samples) {
+				end = len(samples)
+			}
+			currentAudio = append([]float32(nil), samples[start:end]...)
+			currentSegments = []SpeechChunk{chunk}
+			currentDuration = chunkLen
+		} else {
+			currentSegments = append(currentSegments, chunk)
+			start := chunk.Start
+			end := chunk.End
+			if start > len(samples) {
+				start = len(samples)
+			}
+			if end > len(samples) {
+				end = len(samples)
+			}
+			currentAudio = append(currentAudio, samples[start:end]...)
+			currentDuration += chunkLen
+		}
+	}
+
+	audioChunks = append(audioChunks, currentAudio)
+	metadata = append(metadata, chunkMetadata{
+		offset:   totalDuration / whisperSampleRate,
+		duration: currentDuration / whisperSampleRate,
+		segments: currentSegments,
+	})
+
+	return audioChunks, metadata
+}
+
 // collectChunks concatenates the speech regions from the original audio into
 // a single contiguous buffer.
 func collectChunks(samples []float32, chunks []SpeechChunk) []float32 {

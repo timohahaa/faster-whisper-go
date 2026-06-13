@@ -109,6 +109,16 @@ type TranscribeConfig struct {
 	VadFilter bool
 	// VadConfig controls VAD parameters. nil uses defaults.
 	VadConfig *VadConfig
+
+	// BatchSize is the max number of chunks per batch encode/generate call.
+	// Only used by TranscribeBatched. 0 uses the default (8).
+	BatchSize int
+	// ChunkLength overrides the default 30s max chunk duration for batched mode.
+	// Only used by TranscribeBatched. 0 uses the default (30).
+	ChunkLength int
+	// ClipTimestamps optionally provides pre-computed speech regions.
+	// Only used by TranscribeBatched. When set, VAD is skipped.
+	ClipTimestamps []SpeechChunk
 }
 
 // applyDefaults fills nil/zero fields with sensible defaults.
@@ -171,4 +181,3 @@ func DefaultTranscribeConfig() TranscribeConfig {
 	cfg.applyDefaults()
 	return cfg
 }
-

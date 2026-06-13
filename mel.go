@@ -154,6 +154,45 @@ func computeMelSpectrogram(samples []float32, nMels int, sparse []melFilterSpan)
 	return out, stftFrames
 }
 
+// computeChunkMel computes the mel spectrogram for a single audio chunk,
+// drops the last frame (matching Python's feature_extractor(chunk)[..., :-1]),
+// and pads/trims to exactly whisperNFrames frames.
+// Returns a flat [nMels * whisperNFrames] slice suitable for batch stacking.
+func computeChunkMel(samples []float32, nMels int, sparse []melFilterSpan) []float32 {
+	mel, totalFrames := computeMelSpectrogram(samples, nMels, sparse)
+	// Drop last frame to match Python behavior.
+	frames := totalFrames - 1
+	if frames < 0 {
+		frames = 0
+	}
+
+	out := make([]float32, nMels*whisperNFrames)
+	copyFrames := frames
+	if copyFrames > whisperNFrames {
+		copyFrames = whisperNFrames
+	}
+	for bin := range nMels {
+		srcBase := bin * totalFrames
+		dstBase := bin * whisperNFrames
+		copy(out[dstBase:dstBase+copyFrames], mel[srcBase:srcBase+copyFrames])
+	}
+	return out
+}
+
+// stackMelBatch concatenates N mel chunks into a single flat buffer
+// of shape [N, nMels, whisperNFrames] suitable for batch encode.
+func stackMelBatch(chunks [][]float32) []float32 {
+	if len(chunks) == 0 {
+		return nil
+	}
+	chunkSize := len(chunks[0])
+	out := make([]float32, len(chunks)*chunkSize)
+	for i, chunk := range chunks {
+		copy(out[i*chunkSize:], chunk)
+	}
+	return out
+}
+
 // extractMelWindow copies frames [seek, seek+size) from the full mel spectrogram
 // into a contiguous buffer of exactly nMels*whisperNFrames elements, zero-padding
 // if fewer than whisperNFrames frames are available.

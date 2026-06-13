@@ -77,6 +77,41 @@ void ct2_generate_result_free(ct2_generate_result* r);
 void ct2_detect_result_free(ct2_detect_result* r);
 void ct2_align_result_free(ct2_align_result* r);
 
+/* ---- Batched API ---- */
+
+typedef struct {
+    size_t batch_size;
+    int32_t** sequences_ids;      /* [batch_size] pointers to token arrays */
+    size_t* sequences_counts;     /* [batch_size] lengths */
+    float* scores;                /* [batch_size] */
+    float* no_speech_probs;       /* [batch_size] */
+    char* error;
+} ct2_batch_generate_result;
+
+ct2_encoder_output* ct2_encode_batch(
+    ct2_model* m,
+    const float* mel, size_t batch_size, size_t n_mels, size_t n_frames,
+    char** error_out);
+
+ct2_batch_generate_result ct2_generate_batch(
+    ct2_model* m,
+    ct2_encoder_output* encoder_output,
+    const int32_t** prompt_tokens, const size_t* prompt_counts,
+    size_t batch_size,
+    int beam_size, int best_of,
+    float patience, float length_penalty,
+    float repetition_penalty, int no_repeat_ngram_size,
+    int max_length,
+    bool suppress_blank,
+    float sampling_temperature,
+    const int32_t* suppress_tokens, size_t suppress_tokens_count);
+
+void ct2_batch_generate_result_free(ct2_batch_generate_result* r);
+
+ct2_encoder_output* ct2_encoder_output_slice(
+    ct2_encoder_output* batch_enc, size_t index,
+    char** error_out);
+
 #ifdef __cplusplus
 }
 #endif

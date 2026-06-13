@@ -53,6 +53,64 @@ ctranslate2::StorageView make_mel_features(
         ctranslate2::Device::CPU);
 }
 
+ctranslate2::StorageView make_mel_features_batch(
+    const float* mel, size_t batch_size, size_t n_mels, size_t n_frames) {
+    size_t total = batch_size * n_mels * n_frames;
+    std::vector<float> data(total);
+    std::memcpy(data.data(), mel, total * sizeof(float));
+    return ctranslate2::StorageView(
+        {static_cast<ctranslate2::dim_t>(batch_size),
+         static_cast<ctranslate2::dim_t>(n_mels),
+         static_cast<ctranslate2::dim_t>(n_frames)},
+        data,
+        ctranslate2::Device::CPU);
+}
+
+ctranslate2::models::WhisperOptions make_whisper_options(
+    int beam_size, int best_of,
+    float patience, float length_penalty,
+    float repetition_penalty, int no_repeat_ngram_size,
+    int max_length, bool suppress_blank,
+    float sampling_temperature,
+    const int32_t* suppress_tokens, size_t suppress_tokens_count) {
+    ctranslate2::models::WhisperOptions options;
+    options.patience = patience > 0 ? patience : 1.0f;
+    options.length_penalty = length_penalty > 0 ? length_penalty : 1.0f;
+    options.repetition_penalty = repetition_penalty > 0 ? repetition_penalty : 1.0f;
+    options.no_repeat_ngram_size =
+        no_repeat_ngram_size > 0 ? static_cast<size_t>(no_repeat_ngram_size) : 0;
+    options.max_length = max_length > 0 ? static_cast<size_t>(max_length) : 448;
+    options.suppress_blank = suppress_blank;
+    options.return_scores = true;
+    options.return_no_speech_prob = true;
+
+    if (sampling_temperature > 0) {
+        options.beam_size = 1;
+        options.num_hypotheses = best_of > 0 ? static_cast<size_t>(best_of) : 1;
+        options.sampling_topk = 0;
+        options.sampling_temperature = sampling_temperature;
+    } else {
+        options.beam_size = beam_size > 0 ? static_cast<size_t>(beam_size) : 1;
+        options.num_hypotheses = 1;
+    }
+
+    if (suppress_tokens != nullptr && suppress_tokens_count > 0) {
+        std::vector<int> stoks(suppress_tokens_count);
+        for (size_t i = 0; i < suppress_tokens_count; ++i) {
+            stoks[i] = static_cast<int>(suppress_tokens[i]);
+        }
+        options.suppress_tokens = std::move(stoks);
+    }
+
+    return options;
+}
+
+ct2_batch_generate_result make_batch_generate_error(const char* message) {
+    ct2_batch_generate_result result{};
+    result.error = copy_string(message);
+    return result;
+}
+
 void set_error_out(char** error_out, const char* message) {
     if (error_out != nullptr) {
         *error_out = copy_string(message);
@@ -200,36 +258,13 @@ ct2_generate_result ct2_generate(
             prompt[i] = static_cast<size_t>(prompt_tokens[i]);
         }
 
-        ctranslate2::models::WhisperOptions options;
-        options.patience = patience > 0 ? patience : 1.0f;
-        options.length_penalty = length_penalty > 0 ? length_penalty : 1.0f;
-        options.repetition_penalty = repetition_penalty > 0 ? repetition_penalty : 1.0f;
-        options.no_repeat_ngram_size =
-            no_repeat_ngram_size > 0 ? static_cast<size_t>(no_repeat_ngram_size) : 0;
-        options.max_length = max_length > 0 ? static_cast<size_t>(max_length) : 448;
-        options.suppress_blank = suppress_blank;
-        options.return_scores = true;
-        options.return_no_speech_prob = true;
+        ctranslate2::models::WhisperOptions options = make_whisper_options(
+            beam_size, best_of, patience, length_penalty,
+            repetition_penalty, no_repeat_ngram_size,
+            max_length, suppress_blank, sampling_temperature,
+            suppress_tokens, suppress_tokens_count);
         options.max_initial_timestamp_index =
             max_initial_timestamp_index >= 0 ? static_cast<size_t>(max_initial_timestamp_index) : 50;
-
-        if (sampling_temperature > 0) {
-            options.beam_size = 1;
-            options.num_hypotheses = best_of > 0 ? static_cast<size_t>(best_of) : 1;
-            options.sampling_topk = 0;
-            options.sampling_temperature = sampling_temperature;
-        } else {
-            options.beam_size = beam_size > 0 ? static_cast<size_t>(beam_size) : 1;
-            options.num_hypotheses = 1;
-        }
-
-        if (suppress_tokens != nullptr && suppress_tokens_count > 0) {
-            std::vector<int> stoks(suppress_tokens_count);
-            for (size_t i = 0; i < suppress_tokens_count; ++i) {
-                stoks[i] = static_cast<int>(suppress_tokens[i]);
-            }
-            options.suppress_tokens = std::move(stoks);
-        }
 
         const std::vector<std::vector<size_t>> prompts = {prompt};
         std::vector<std::future<ctranslate2::models::WhisperGenerationResult>> futures =
@@ -441,6 +476,178 @@ void ct2_align_result_free(ct2_align_result* r) {
     r->error = nullptr;
     r->num_tokens = 0;
     r->num_alignments = 0;
+}
+
+/* ---- Batched API ---- */
+
+ct2_encoder_output* ct2_encode_batch(
+    ct2_model* m,
+    const float* mel, size_t batch_size, size_t n_mels, size_t n_frames,
+    char** error_out) {
+    if (m == nullptr || m->whisper == nullptr) {
+        set_error_out(error_out, "model is null");
+        return nullptr;
+    }
+    if (mel == nullptr || batch_size == 0 || n_mels == 0 || n_frames == 0) {
+        set_error_out(error_out, "mel spectrogram batch is required");
+        return nullptr;
+    }
+
+    try {
+        ctranslate2::StorageView features =
+            make_mel_features_batch(mel, batch_size, n_mels, n_frames);
+        auto future = m->whisper->encode(features, /*to_cpu=*/false);
+        ctranslate2::StorageView encoded = future.get();
+        auto out = new ct2_encoder_output{std::move(encoded)};
+        return out;
+    } catch (const std::exception& e) {
+        set_error_out(error_out, e.what());
+        return nullptr;
+    }
+}
+
+ct2_batch_generate_result ct2_generate_batch(
+    ct2_model* m,
+    ct2_encoder_output* encoder_output,
+    const int32_t** prompt_tokens, const size_t* prompt_counts,
+    size_t batch_size,
+    int beam_size, int best_of,
+    float patience, float length_penalty,
+    float repetition_penalty, int no_repeat_ngram_size,
+    int max_length,
+    bool suppress_blank,
+    float sampling_temperature,
+    const int32_t* suppress_tokens, size_t suppress_tokens_count) {
+    if (m == nullptr || m->whisper == nullptr) {
+        return make_batch_generate_error("model is null");
+    }
+    if (encoder_output == nullptr) {
+        return make_batch_generate_error("encoder output is required");
+    }
+    if (batch_size == 0) {
+        return make_batch_generate_error("batch_size must be > 0");
+    }
+
+    try {
+        std::vector<std::vector<size_t>> prompts(batch_size);
+        for (size_t b = 0; b < batch_size; ++b) {
+            size_t count = prompt_counts[b];
+            prompts[b].resize(count);
+            for (size_t i = 0; i < count; ++i) {
+                prompts[b][i] = static_cast<size_t>(prompt_tokens[b][i]);
+            }
+        }
+
+        ctranslate2::models::WhisperOptions options = make_whisper_options(
+            beam_size, best_of, patience, length_penalty,
+            repetition_penalty, no_repeat_ngram_size,
+            max_length, suppress_blank, sampling_temperature,
+            suppress_tokens, suppress_tokens_count);
+
+        auto futures = m->whisper->generate(
+            encoder_output->view, prompts, options);
+
+        if (futures.size() != batch_size) {
+            return make_batch_generate_error("generate returned unexpected number of results");
+        }
+
+        ct2_batch_generate_result out{};
+        out.batch_size = batch_size;
+        out.sequences_ids = static_cast<int32_t**>(
+            std::calloc(batch_size, sizeof(int32_t*)));
+        out.sequences_counts = static_cast<size_t*>(
+            std::calloc(batch_size, sizeof(size_t)));
+        out.scores = static_cast<float*>(
+            std::calloc(batch_size, sizeof(float)));
+        out.no_speech_probs = static_cast<float*>(
+            std::calloc(batch_size, sizeof(float)));
+
+        if (!out.sequences_ids || !out.sequences_counts ||
+            !out.scores || !out.no_speech_probs) {
+            ct2_batch_generate_result_free(&out);
+            return make_batch_generate_error("failed to allocate batch result");
+        }
+
+        for (size_t b = 0; b < batch_size; ++b) {
+            auto result = futures[b].get();
+
+            if (result.sequences_ids.empty() || result.sequences_ids.front().empty()) {
+                out.sequences_counts[b] = 0;
+                continue;
+            }
+
+            const auto& seq = result.sequences_ids.front();
+            out.sequences_counts[b] = seq.size();
+            out.sequences_ids[b] = static_cast<int32_t*>(
+                std::malloc(seq.size() * sizeof(int32_t)));
+            if (out.sequences_ids[b] == nullptr) {
+                ct2_batch_generate_result_free(&out);
+                return make_batch_generate_error("failed to allocate token sequence");
+            }
+            for (size_t i = 0; i < seq.size(); ++i) {
+                out.sequences_ids[b][i] = static_cast<int32_t>(seq[i]);
+            }
+
+            if (result.has_scores()) {
+                out.scores[b] = result.scores.front();
+            }
+            out.no_speech_probs[b] = result.no_speech_prob;
+        }
+
+        return out;
+    } catch (const std::exception& e) {
+        return make_batch_generate_error(e.what());
+    }
+}
+
+void ct2_batch_generate_result_free(ct2_batch_generate_result* r) {
+    if (r == nullptr) {
+        return;
+    }
+    if (r->sequences_ids != nullptr) {
+        for (size_t i = 0; i < r->batch_size; ++i) {
+            std::free(r->sequences_ids[i]);
+        }
+        std::free(r->sequences_ids);
+    }
+    std::free(r->sequences_counts);
+    std::free(r->scores);
+    std::free(r->no_speech_probs);
+    std::free(r->error);
+    *r = ct2_batch_generate_result{};
+}
+
+ct2_encoder_output* ct2_encoder_output_slice(
+    ct2_encoder_output* batch_enc, size_t index,
+    char** error_out) {
+    if (batch_enc == nullptr) {
+        set_error_out(error_out, "encoder output is null");
+        return nullptr;
+    }
+
+    try {
+        const auto& shape = batch_enc->view.shape();
+        if (shape.size() < 1 || index >= static_cast<size_t>(shape[0])) {
+            set_error_out(error_out, "index out of range");
+            return nullptr;
+        }
+
+        ctranslate2::dim_t seq_len = shape.size() >= 2 ? shape[1] : 1;
+        ctranslate2::dim_t feat_dim = shape.size() >= 3 ? shape[2] : 1;
+        size_t stride = static_cast<size_t>(seq_len) * static_cast<size_t>(feat_dim);
+        size_t offset = index * stride;
+
+        const float* src = batch_enc->view.data<float>() + offset;
+        std::vector<float> data(src, src + stride);
+
+        ctranslate2::StorageView sliced(
+            {1, seq_len, feat_dim}, data, batch_enc->view.device());
+        auto out = new ct2_encoder_output{std::move(sliced)};
+        return out;
+    } catch (const std::exception& e) {
+        set_error_out(error_out, e.what());
+        return nullptr;
+    }
 }
 
 }  // extern "C"

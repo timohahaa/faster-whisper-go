@@ -292,6 +292,151 @@ func (m *Model) Align(enc *EncoderOutput, startSeq, textTokens []int32, numFrame
 	}, nil
 }
 
+// EncodeBatch runs the Whisper encoder on a batch of mel spectrograms.
+// mel must be a flat buffer of shape [batchSize, nMels, nFrames].
+func (m *Model) EncodeBatch(mel []float32, batchSize, nMels, nFrames int) (*EncoderOutput, error) {
+	if m == nil || m.ptr == nil {
+		return nil, errors.New("model is closed")
+	}
+	if len(mel) == 0 || batchSize == 0 {
+		return nil, errors.New("mel spectrogram batch is required")
+	}
+
+	var cErr *C.char
+	ptr := C.ct2_encode_batch(
+		m.ptr,
+		(*C.float)(unsafe.Pointer(&mel[0])),
+		C.size_t(batchSize),
+		C.size_t(nMels),
+		C.size_t(nFrames),
+		&cErr,
+	)
+	if ptr == nil {
+		err := errors.New(C.GoString(cErr))
+		C.free(unsafe.Pointer(cErr))
+		return nil, err
+	}
+
+	return &EncoderOutput{ptr: ptr}, nil
+}
+
+// BatchGenerateResult holds per-item results from a batched generate call.
+type BatchGenerateResult struct {
+	Items []GenerateResult
+}
+
+// GenerateBatch runs Whisper decoding on a batched encoder output with one
+// prompt per batch item.
+func (m *Model) GenerateBatch(enc *EncoderOutput, prompts [][]int32, opts GenerateOptions) (BatchGenerateResult, error) {
+	if m == nil || m.ptr == nil {
+		return BatchGenerateResult{}, errors.New("model is closed")
+	}
+	if enc == nil || enc.ptr == nil {
+		return BatchGenerateResult{}, errors.New("encoder output is required")
+	}
+	batchSize := len(prompts)
+	if batchSize == 0 {
+		return BatchGenerateResult{}, errors.New("prompts are required")
+	}
+
+	// Flatten all prompts into a single C-allocated buffer to satisfy cgo
+	// pointer rules (Go pointers containing Go pointers cannot be passed to C).
+	totalTokens := 0
+	for _, p := range prompts {
+		totalTokens += len(p)
+	}
+
+	cTokensBuf := (*C.int32_t)(C.malloc(C.size_t(totalTokens) * C.size_t(unsafe.Sizeof(C.int32_t(0)))))
+	defer C.free(unsafe.Pointer(cTokensBuf))
+	cPromptPtrs := (**C.int32_t)(C.malloc(C.size_t(batchSize) * C.size_t(unsafe.Sizeof(cTokensBuf))))
+	defer C.free(unsafe.Pointer(cPromptPtrs))
+	cPromptCounts := (*C.size_t)(C.malloc(C.size_t(batchSize) * C.size_t(unsafe.Sizeof(C.size_t(0)))))
+	defer C.free(unsafe.Pointer(cPromptCounts))
+
+	promptPtrsSlice := unsafe.Slice(cPromptPtrs, batchSize)
+	promptCountsSlice := unsafe.Slice(cPromptCounts, batchSize)
+	tokensBufSlice := unsafe.Slice(cTokensBuf, totalTokens)
+
+	offset := 0
+	for i, p := range prompts {
+		promptCountsSlice[i] = C.size_t(len(p))
+		if len(p) > 0 {
+			promptPtrsSlice[i] = &tokensBufSlice[offset]
+			for j, tok := range p {
+				tokensBufSlice[offset+j] = C.int32_t(tok)
+			}
+			offset += len(p)
+		}
+	}
+
+	var suppressPtr *C.int32_t
+	suppressCount := len(opts.SuppressTokens)
+	if suppressCount > 0 {
+		suppressPtr = (*C.int32_t)(unsafe.Pointer(&opts.SuppressTokens[0]))
+	}
+
+	result := C.ct2_generate_batch(
+		m.ptr,
+		enc.ptr,
+		cPromptPtrs,
+		cPromptCounts,
+		C.size_t(batchSize),
+		C.int(opts.BeamSize),
+		C.int(opts.BestOf),
+		C.float(opts.Patience),
+		C.float(opts.LengthPenalty),
+		C.float(opts.RepetitionPenalty),
+		C.int(opts.NoRepeatNgramSize),
+		C.int(opts.MaxLength),
+		C.bool(opts.SuppressBlank),
+		C.float(opts.SamplingTemperature),
+		suppressPtr,
+		C.size_t(suppressCount),
+	)
+	defer C.ct2_batch_generate_result_free(&result)
+
+	if result.error != nil {
+		return BatchGenerateResult{}, errors.New(C.GoString(result.error))
+	}
+
+	items := make([]GenerateResult, batchSize)
+	seqIDs := unsafe.Slice(result.sequences_ids, batchSize)
+	seqCounts := unsafe.Slice(result.sequences_counts, batchSize)
+	scores := unsafe.Slice(result.scores, batchSize)
+	noSpeechProbs := unsafe.Slice(result.no_speech_probs, batchSize)
+
+	for i := 0; i < batchSize; i++ {
+		items[i] = GenerateResult{
+			Score:        float32(scores[i]),
+			NoSpeechProb: float32(noSpeechProbs[i]),
+		}
+		count := int(seqCounts[i])
+		if count > 0 && seqIDs[i] != nil {
+			items[i].SequenceIDs = cInt32Slice(seqIDs[i], count)
+		}
+	}
+
+	return BatchGenerateResult{Items: items}, nil
+}
+
+// Slice extracts a single-item encoder output from a batched encoder output.
+// The returned EncoderOutput is an independent copy and must be freed separately.
+func (e *EncoderOutput) Slice(index int) (*EncoderOutput, error) {
+	if e == nil || e.ptr == nil {
+		return nil, errors.New("encoder output is nil")
+	}
+
+	var cErr *C.char
+	ptr := C.ct2_encoder_output_slice(e.ptr, C.size_t(index), &cErr)
+	if ptr == nil {
+		err := errors.New(C.GoString(cErr))
+		C.free(unsafe.Pointer(cErr))
+		return nil, err
+	}
+
+	return &EncoderOutput{ptr: ptr}, nil
+}
+
 func cInt32Slice(ptr *C.int32_t, count int) []int32 {
 	if ptr == nil || count == 0 {
 		return nil
