@@ -136,6 +136,10 @@ func (m *Model) infer(ctx context.Context, samples []float32, cfg TranscribeConf
 		}
 	}
 
+	if cfg.FilterHallucinationPhrases {
+		segments = filterHallucinationPhrases(segments, lang)
+	}
+
 	return &Result{
 		Text:     joinSegmentsText(segments),
 		Segments: segments,

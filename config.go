@@ -95,6 +95,11 @@ type TranscribeConfig struct {
 	// nil means disabled. Only effective when WordTimestamps is true.
 	HallucinationSilenceThreshold *float32
 
+	// FilterHallucinationPhrases drops segments whose full text exactly matches
+	// (case-insensitively) a known per-language hallucination phrase from the
+	// embedded blocklist. Disabled by default.
+	FilterHallucinationPhrases bool
+
 	// PrependPunctuations lists punctuation symbols that should be merged with
 	// the following word during word timestamp extraction.
 	// Empty uses default: "\"'"¿([{-"

@@ -374,6 +374,10 @@ func (m *Model) inferBatched(ctx context.Context, samples []float32, cfg Transcr
 		}
 	}
 
+	if cfg.FilterHallucinationPhrases {
+		allSegments = filterHallucinationPhrases(allSegments, lang)
+	}
+
 	return &Result{
 		Text:     joinSegmentsText(allSegments),
 		Segments: allSegments,
