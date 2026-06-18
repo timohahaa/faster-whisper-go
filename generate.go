@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/zlib"
 	"math"
+	"strings"
 	"sync"
 
 	"github.com/timohahaa/faster-whisper-go/internal/ct2bridge"
@@ -64,7 +65,7 @@ func (m *Model) generateWithFallback(
 
 		avgLogProb := recoverAvgLogProb(genResult.Score, len(genResult.SequenceIDs), *cfg.LengthPenalty)
 
-		text := m.tokenizer.decode(genResult.SequenceIDs)
+		text := strings.TrimSpace(m.tokenizer.decode(genResult.SequenceIDs))
 		compRatio := compressionRatio(text)
 
 		fb := fallbackResult{
@@ -85,10 +86,13 @@ func (m *Model) generateWithFallback(
 		}
 
 		if avgLogProb < *cfg.LogProbThreshold {
-			isNoSpeech := *cfg.NoSpeechThreshold > 0 && genResult.NoSpeechProb > *cfg.NoSpeechThreshold
-			if !isNoSpeech {
-				needsFallback = true
-			}
+			needsFallback = true
+		}
+
+		// silence overrides any fallback decision (including one triggered by a high compression ratio)
+		if *cfg.NoSpeechThreshold > 0 && genResult.NoSpeechProb > *cfg.NoSpeechThreshold &&
+			avgLogProb < *cfg.LogProbThreshold {
+			needsFallback = false
 		}
 
 		if best == nil || fb.avgLogProb > best.avgLogProb {

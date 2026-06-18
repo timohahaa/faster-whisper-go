@@ -60,6 +60,12 @@ func (m *Model) infer(ctx context.Context, samples []float32, cfg TranscribeConf
 	}
 
 	mel, totalFrames := computeMelSpectrogram(samples, m.nMels, m.sparseFilters)
+	// faster-whisper drops the trailing feature frame when bounding the seek
+	// loop: content_frames = features.shape[-1] - 1.
+	contentFrames := totalFrames - 1
+	if contentFrames < 0 {
+		contentFrames = 0
+	}
 
 	lang := cfg.Language
 	var langProb float32
@@ -92,15 +98,16 @@ func (m *Model) infer(ctx context.Context, samples []float32, cfg TranscribeConf
 	var segments []Segment
 	var lastSpeechTimestamp float64
 
-	for seek < totalFrames {
+	for seek < contentFrames {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
 
-		segmentSize := min(whisperNFrames, totalFrames-seek)
+		segmentSize := min(whisperNFrames, contentFrames-seek)
 		winRes, err := m.processWindow(processWindowParams{
 			mel:                 mel,
 			totalFrames:         totalFrames,
+			contentFrames:       contentFrames,
 			seek:                seek,
 			segmentSize:         segmentSize,
 			lang:                lang,
@@ -195,6 +202,7 @@ func (m *Model) detectLanguageFromMel(mel []float32, totalFrames, seekOffset int
 type processWindowParams struct {
 	mel                 []float32
 	totalFrames         int
+	contentFrames       int
 	seek                int
 	segmentSize         int
 	lang                string
@@ -369,7 +377,7 @@ func (m *Model) applyHallucinationSilence(
 
 	// Check each segment for a hallucination surrounded by silence.
 	halLastEnd := lastSpeechTS
-	contentDuration := float64(p.totalFrames) * timePerFrame
+	contentDuration := float64(p.contentFrames) * timePerFrame
 	for si := range segments {
 		if len(segments[si].Words) == 0 {
 			continue
@@ -393,7 +401,7 @@ func (m *Model) applyHallucinationSilence(
 			if silenceBefore && silenceAfter {
 				seek = int(math.Round(math.Max(timeOffset+1, segStart) * framesPerSecond))
 				if contentDuration-segEnd < threshold {
-					seek = p.totalFrames
+					seek = p.contentFrames
 				}
 				segments = segments[:si]
 				break
