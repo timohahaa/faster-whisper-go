@@ -52,7 +52,7 @@ func TestTranscribeWAV(t *testing.T) {
 
 func TestTranscribeBatchedWAV(t *testing.T) {
 	//wavPath := filepath.Join(testdataDir, "test.wav")
-	wavPath := filepath.Join(testdataDir, "anthropic_workshop_en.wav")
+	wavPath := filepath.Join(testdataDir, "test.wav")
 
 	samples, err := readWAV(wavPath)
 	if err != nil {

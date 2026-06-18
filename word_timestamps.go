@@ -10,6 +10,10 @@ import (
 
 const defaultMedianFilterWidth = 7
 
+// maxMedianWordDurationS caps the per-segment median word duration used by the
+// timing-truncation hacks (matches Python's min(0.7, median_duration)).
+const maxMedianWordDurationS = 0.7
+
 const tokensPerSecond = float64(whisperSampleRate) / float64(whisperHopLength*inputStride)
 
 const sentenceEndMarks = ".。!！?？"
@@ -172,7 +176,7 @@ func (m *Model) addWordTimestamps(
 	if len(durations) > 0 {
 		medianDuration = median(durations)
 	}
-	medianDuration = math.Min(0.7, medianDuration)
+	medianDuration = math.Min(maxMedianWordDurationS, medianDuration)
 	maxDuration := medianDuration * 2
 
 	// Truncate long words at sentence boundaries.

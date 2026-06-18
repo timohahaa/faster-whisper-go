@@ -4,20 +4,34 @@ import "strings"
 
 const anomalyPunctuation = `"'"¿([{-"'.。,，!！?？:：")]}、`
 
+const (
+	// Anomaly scoring thresholds (match Python's word_anomaly_score).
+	anomalyLowProb           = 0.15  // words below this probability are suspicious
+	anomalyShortDurationS    = 0.133 // words shorter than this are penalized
+	anomalyShortPenaltyScale = 15.0  // penalty scale for too-short words
+	anomalyLongDurationS     = 2.0   // words longer than this are penalized
+	anomalyMaxWords          = 8     // only the first N words of a segment are scored
+	anomalyScoreThreshold    = 3.0   // total score at/above which a segment is anomalous
+
+	// hallucinationEdgeMarginS is the silence margin (seconds) around a segment
+	// used when deciding whether a possible hallucination is surrounded by silence.
+	hallucinationEdgeMarginS = 2.0
+)
+
 // wordAnomalyScore computes an anomaly score for a single word based on
 // its probability and duration (matching Python's word_anomaly_score).
 func wordAnomalyScore(w Word) float64 {
 	prob := float64(w.Probability)
 	dur := w.End.Seconds() - w.Start.Seconds()
 	score := 0.0
-	if prob < 0.15 {
+	if prob < anomalyLowProb {
 		score += 1.0
 	}
-	if dur < 0.133 {
-		score += (0.133 - dur) * 15
+	if dur < anomalyShortDurationS {
+		score += (anomalyShortDurationS - dur) * anomalyShortPenaltyScale
 	}
-	if dur > 2.0 {
-		score += dur - 2.0
+	if dur > anomalyLongDurationS {
+		score += dur - anomalyLongDurationS
 	}
 	return score
 }
@@ -38,15 +52,15 @@ func isSegmentAnomaly(seg Segment) bool {
 	if len(words) == 0 {
 		return false
 	}
-	if len(words) > 8 {
-		words = words[:8]
+	if len(words) > anomalyMaxWords {
+		words = words[:anomalyMaxWords]
 	}
 	var score float64
 	for _, w := range words {
 		score += wordAnomalyScore(w)
 	}
 	n := float64(len(words))
-	return score >= 3 || score+0.01 >= n
+	return score >= anomalyScoreThreshold || score+0.01 >= n
 }
 
 func isAnomalyPunctuation(word string) bool {

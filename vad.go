@@ -242,9 +242,8 @@ func getSpeechProbs(samples []float32) []float32 {
 
 // chunkMetadata tracks the origin of a batched audio chunk for timestamp restoration.
 type chunkMetadata struct {
-	offset   float64       // seconds from start of original audio
-	duration float64       // seconds of speech in this chunk
-	segments []SpeechChunk // original VAD segments composing this chunk
+	offset   float64 // seconds from start of original audio
+	duration float64 // seconds of speech in this chunk
 }
 
 // collectChunksBatched groups speech chunks into audio segments of at most
@@ -261,7 +260,6 @@ func collectChunksBatched(samples []float32, chunks []SpeechChunk, maxDuration f
 	var metadata []chunkMetadata
 
 	var currentAudio []float32
-	var currentSegments []SpeechChunk
 	var currentDuration float64
 	var totalDuration float64
 
@@ -273,7 +271,6 @@ func collectChunksBatched(samples []float32, chunks []SpeechChunk, maxDuration f
 			metadata = append(metadata, chunkMetadata{
 				offset:   totalDuration / whisperSampleRate,
 				duration: currentDuration / whisperSampleRate,
-				segments: currentSegments,
 			})
 			totalDuration += currentDuration
 
@@ -286,10 +283,8 @@ func collectChunksBatched(samples []float32, chunks []SpeechChunk, maxDuration f
 				end = len(samples)
 			}
 			currentAudio = append([]float32(nil), samples[start:end]...)
-			currentSegments = []SpeechChunk{chunk}
 			currentDuration = chunkLen
 		} else {
-			currentSegments = append(currentSegments, chunk)
 			start := chunk.Start
 			end := chunk.End
 			if start > len(samples) {
@@ -307,7 +302,6 @@ func collectChunksBatched(samples []float32, chunks []SpeechChunk, maxDuration f
 	metadata = append(metadata, chunkMetadata{
 		offset:   totalDuration / whisperSampleRate,
 		duration: currentDuration / whisperSampleRate,
-		segments: currentSegments,
 	})
 
 	return audioChunks, metadata

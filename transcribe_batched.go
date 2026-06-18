@@ -3,9 +3,7 @@ package whisper
 import (
 	"context"
 	"errors"
-	"fmt"
 	"math"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -13,11 +11,23 @@ import (
 	"github.com/timohahaa/faster-whisper-go/internal/ct2bridge"
 )
 
+const (
+	defaultBatchSize    = 8
+	defaultMelWorkers   = 4
+	batchedMinSilenceMs = 160
+)
+
 // TranscribeBatched runs speech recognition by splitting audio into independent
 // chunks via VAD and processing them in parallel batches through the encoder
 // and decoder. This gives higher throughput than the sequential Transcribe
 // method, at the cost of losing cross-window context.
 func (m *Model) TranscribeBatched(ctx context.Context, samples []float32, cfg TranscribeConfig) (*Result, error) {
+	return m.inferBatched(ctx, samples, cfg, m.tokenizer.transcribe)
+}
+
+// inferBatched is the shared batched pipeline for transcription and translation;
+// taskToken selects the decoding task (transcribe or translate).
+func (m *Model) inferBatched(ctx context.Context, samples []float32, cfg TranscribeConfig, taskToken int32) (*Result, error) {
 	if m == nil || m.bridge == nil {
 		return nil, errors.New("model is closed")
 	}
@@ -30,18 +40,14 @@ func (m *Model) TranscribeBatched(ctx context.Context, samples []float32, cfg Tr
 
 	cfg.applyDefaults()
 	if cfg.BatchSize == 0 {
-		cfg.BatchSize = 8
+		cfg.BatchSize = defaultBatchSize
 	}
 	if cfg.ChunkLength == 0 {
 		cfg.ChunkLength = whisperChunkLen
 	}
 	if cfg.MelWorkers == 0 {
-		cfg.MelWorkers = 4
+		cfg.MelWorkers = defaultMelWorkers
 	}
-
-	prof := os.Getenv("WHISPER_PROFILE") != ""
-	var tVad, tMel, tEncode, tGenerate, tWord time.Duration
-	profStart := time.Now()
 
 	duration := time.Duration(float64(len(samples)) / whisperSampleRate * float64(time.Second))
 	chunkLength := cfg.ChunkLength
@@ -69,7 +75,6 @@ func (m *Model) TranscribeBatched(ctx context.Context, samples []float32, cfg Tr
 			chunksMetadata[i] = chunkMetadata{
 				offset:   float64(clip.Start) / whisperSampleRate,
 				duration: clipDuration,
-				segments: []SpeechChunk{clip},
 			}
 		}
 		speechChunks = cfg.ClipTimestamps
@@ -80,13 +85,11 @@ func (m *Model) TranscribeBatched(ctx context.Context, samples []float32, cfg Tr
 		}
 		vadCfg.MaxSpeechDurationS = float64(chunkLength)
 		if vadCfg.MinSilenceDurationMs == 0 {
-			vadCfg.MinSilenceDurationMs = 160
+			vadCfg.MinSilenceDurationMs = batchedMinSilenceMs
 		}
 		vadCfg.applyDefaults()
 
-		vadStart := time.Now()
 		speechChunks = GetSpeechTimestamps(samples, *vadCfg)
-		tVad += time.Since(vadStart)
 
 		if len(speechChunks) == 0 {
 			durationSec := float64(len(samples)) / whisperSampleRate
@@ -105,7 +108,6 @@ func (m *Model) TranscribeBatched(ctx context.Context, samples []float32, cfg Tr
 
 	// Compute mel features for each chunk. Chunks are independent, so spread
 	// the (pure-Go, CPU-bound) STFT + mel filterbank work across all cores.
-	melStart := time.Now()
 	melChunks := make([][]float32, len(audioChunks))
 	melWorkers := cfg.MelWorkers
 	if melWorkers > len(audioChunks) {
@@ -134,7 +136,6 @@ func (m *Model) TranscribeBatched(ctx context.Context, samples []float32, cfg Tr
 		}()
 	}
 	melWG.Wait()
-	tMel += time.Since(melStart)
 
 	// Detect language if needed.
 	lang := cfg.Language
@@ -171,8 +172,6 @@ func (m *Model) TranscribeBatched(ctx context.Context, samples []float32, cfg Tr
 	if cfg.InitialPrompt != "" {
 		previousTokens = m.tokenizer.Encode(" " + strings.TrimSpace(cfg.InitialPrompt))
 	}
-
-	taskToken := m.tokenizer.transcribe
 
 	basePrompt := m.buildBatchedPrompt(lang, previousTokens, cfg, taskToken)
 
@@ -217,12 +216,10 @@ func (m *Model) TranscribeBatched(ctx context.Context, samples []float32, cfg Tr
 		batchSize := len(batchMels)
 
 		flatMel := stackMelBatch(batchMels)
-		encStart := time.Now()
 		enc, err := m.bridge.EncodeBatch(flatMel, batchSize, m.nMels, whisperNFrames)
 		if err != nil {
 			return nil, err
 		}
-		tEncode += time.Since(encStart)
 
 		// Build per-item prompts.
 		prompts := make([][]int32, batchSize)
@@ -261,13 +258,11 @@ func (m *Model) TranscribeBatched(ctx context.Context, samples []float32, cfg Tr
 			}
 		}
 
-		genStart := time.Now()
 		batchResult, err := m.bridge.GenerateBatch(enc, prompts, opts)
 		if err != nil {
 			enc.Free()
 			return nil, err
 		}
-		tGenerate += time.Since(genStart)
 
 		// Post-process each item: split by timestamps, build segments.
 		type chunkSegments struct {
@@ -331,7 +326,6 @@ func (m *Model) TranscribeBatched(ctx context.Context, samples []float32, cfg Tr
 		}
 
 		// Word timestamps: process per-chunk using sliced encoder output.
-		wordStart := time.Now()
 		if cfg.WordTimestamps && !cfg.DisableTimestamps {
 			for i := range batchSize {
 				cr := &chunkResults[i]
@@ -355,7 +349,6 @@ func (m *Model) TranscribeBatched(ctx context.Context, samples []float32, cfg Tr
 				slicedEnc.Free()
 			}
 		}
-		tWord += time.Since(wordStart)
 
 		enc.Free()
 
@@ -370,15 +363,6 @@ func (m *Model) TranscribeBatched(ctx context.Context, samples []float32, cfg Tr
 		for i := range allSegments {
 			tsMap.restoreSegmentTimestamps(&allSegments[i])
 		}
-	}
-
-	if prof {
-		total := time.Since(profStart)
-		other := total - tVad - tMel - tEncode - tGenerate - tWord
-		fmt.Fprintf(os.Stderr,
-			"[profile] total=%.2fs vad=%.2fs mel=%.2fs encode=%.2fs generate=%.2fs word=%.2fs other=%.2fs (chunks=%d)\n",
-			total.Seconds(), tVad.Seconds(), tMel.Seconds(), tEncode.Seconds(),
-			tGenerate.Seconds(), tWord.Seconds(), other.Seconds(), len(audioChunks))
 	}
 
 	var textBuf strings.Builder
@@ -404,11 +388,7 @@ func (m *Model) TranscribeBatched(ctx context.Context, samples []float32, cfg Tr
 // TranslateBatched runs batched speech recognition and translates the result
 // into English.
 func (m *Model) TranslateBatched(ctx context.Context, samples []float32, cfg TranscribeConfig) (*Result, error) {
-	// Translation uses the same pipeline; the task token is embedded in the
-	// prompt by buildBatchedPrompt when the task token is the translate token.
-	// For now, expose only Transcribe; translate support can be added by
-	// parameterizing the task token if needed.
-	return m.TranscribeBatched(ctx, samples, cfg)
+	return m.inferBatched(ctx, samples, cfg, m.tokenizer.translate)
 }
 
 // buildBatchedPrompt constructs the decoder prompt for batched mode.

@@ -166,21 +166,14 @@ func (m *Model) DetectLanguage(ctx context.Context, samples []float32) (Language
 
 	audio := padOrTrim(samples, whisperSampleRate*whisperChunkLen)
 	mel, totalFrames := computeMelSpectrogram(audio, m.nMels, m.sparseFilters)
-	window := extractMelWindow(mel, totalFrames, m.nMels, 0, whisperNFrames)
 
-	enc, err := m.bridge.Encode(window, m.nMels, whisperNFrames)
-	if err != nil {
-		return LanguageDetection{}, err
-	}
-	defer enc.Free()
-
-	result, err := m.bridge.DetectLanguage(enc)
+	lang, prob, err := m.detectLanguageFromMel(mel, totalFrames, 0)
 	if err != nil {
 		return LanguageDetection{}, err
 	}
 	return LanguageDetection{
-		Language:    result.Language,
-		Probability: result.Probability,
+		Language:    lang,
+		Probability: prob,
 	}, nil
 }
 
@@ -348,10 +341,10 @@ func (m *Model) processWindow(p processWindowParams) (windowResult, error) {
 
 					silenceBefore := segStart-halLastEnd > threshold ||
 						segStart < threshold ||
-						segStart-timeOffset < 2.0
+						segStart-timeOffset < hallucinationEdgeMarginS
 					silenceAfter := halNextStart-segEnd > threshold ||
 						(si+1 < len(segments) && isSegmentAnomaly(segments[si+1])) ||
-						windowEndTime-segEnd < 2.0
+						windowEndTime-segEnd < hallucinationEdgeMarginS
 
 					if silenceBefore && silenceAfter {
 						seek = int(math.Round(math.Max(timeOffset+1, segStart) * framesPerSecond))
