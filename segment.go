@@ -10,7 +10,7 @@ type segmentSplitResult struct {
 }
 
 // splitSegmentsByTimestamps parses timestamp tokens to determine segment boundaries
-// and how far to advance the seek position, matching the Python _split_segments_by_timestamps.
+// and how far to advance the seek position.
 func (t *tokenizer) splitSegmentsByTimestamps(
 	tokens []int32,
 	timeOffset float64,

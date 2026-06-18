@@ -23,13 +23,13 @@ const maxTokenLength = 448
 
 // tokenizer decodes/encodes Whisper token IDs.
 type tokenizer struct {
-	idToToken       map[int32]string
-	tokenToID       map[string]int32
-	langToToken     map[string]int32
-	mergeRank       map[string]int
-	byteEncoder     [256]rune  // byte -> printable rune
-	byteDecoder     [512]int16 // printable rune -> byte, -1 if unmapped
-	nonSpeechCache  []int32
+	idToToken      map[int32]string
+	tokenToID      map[string]int32
+	langToToken    map[string]int32
+	mergeRank      map[string]int
+	byteEncoder    [256]rune  // byte -> printable rune
+	byteDecoder    [512]int16 // printable rune -> byte, -1 if unmapped
+	nonSpeechCache []int32
 
 	// Per-model special token IDs, all resolved from the loaded vocabulary by
 	// initSpecialTokens. Concrete IDs vary with the language-block size (e.g.
@@ -47,7 +47,7 @@ type tokenizer struct {
 }
 
 // initSpecialTokens resolves every special token ID from the loaded vocabulary
-// (mirroring the Python tokenizer's token_to_id lookups). Concrete IDs vary
+// using token-to-ID lookups. Concrete IDs vary
 // across model variants whose language-token block differs in size, so nothing
 // is hardcoded. Returns an error listing any tokens the model is missing.
 func (t *tokenizer) initSpecialTokens() error {
@@ -73,8 +73,8 @@ func (t *tokenizer) initSpecialTokens() error {
 		return fmt.Errorf("tokenizer.json missing special tokens: %s", strings.Join(missing, ", "))
 	}
 	// Timestamp tokens are not named entries in the vocabulary; the first one
-	// (<|0.00|>) immediately follows <|notimestamps|> (matches the Python
-	// tokenizer's timestamp_begin = no_timestamps + 1).
+	// (<|0.00|>) immediately follows <|notimestamps|>, so timestampBegin =
+	// noTimestamps + 1.
 	t.timestampBegin = t.noTimestamps + 1
 	return nil
 }
@@ -181,8 +181,7 @@ var cjkLanguages = map[string]bool{
 
 // splitToWordTokens groups tokens into words. For CJK languages the split is
 // character-based (unicode boundaries); for others it is space-based.
-// Returns (words, wordTokens) where words retain leading spaces from BPE
-// (matching Python's split_to_word_tokens).
+// Returns (words, wordTokens) where words retain leading spaces from BPE.
 func (t *tokenizer) splitToWordTokens(tokens []int32, lang string) ([]string, [][]int32) {
 	if cjkLanguages[lang] {
 		return t.splitTokensOnUnicode(tokens)
@@ -269,7 +268,7 @@ func isPunctuationChar(s string) bool {
 // encode converts text into token IDs using GPT-2 BPE with regex pre-tokenization.
 // The input is first split into chunks by the GPT-2 regex (contractions, words,
 // numbers, punctuation, whitespace), then each chunk is byte-level BPE-encoded
-// independently — matching the HuggingFace/Python tokenizer behavior.
+// independently — standard GPT-2 byte-level BPE tokenization.
 func (t *tokenizer) encode(text string) []int32 {
 	if text == "" {
 		return nil

@@ -177,8 +177,8 @@ func (m *Model) inferBatched(ctx context.Context, samples []float32, cfg Transcr
 		previousTokens = m.tokenizer.encode(" " + strings.TrimSpace(cfg.InitialPrompt))
 	}
 
-	// Batched mode always decodes without timestamp tokens, matching
-	// faster-whisper's BatchedInferencePipeline (without_timestamps=True):
+	// Batched mode always decodes without timestamp tokens, like the batched
+	// inference pipeline (decoding without timestamps):
 	// coarse segment boundaries come from the VAD chunks and word-level timing
 	// from the separate alignment pass, so emitting timestamp tokens here only
 	// lengthens the decoded sequence and slows generation for no benefit.

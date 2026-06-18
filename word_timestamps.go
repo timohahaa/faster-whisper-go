@@ -11,7 +11,7 @@ import (
 const defaultMedianFilterWidth = 7
 
 // maxMedianWordDurationS caps the per-segment median word duration used by the
-// timing-truncation hacks (matches Python's min(0.7, median_duration)).
+// timing-truncation hacks (capped at min(0.7, median_duration)).
 const maxMedianWordDurationS = 0.7
 
 const tokensPerSecond = float64(whisperSampleRate) / float64(whisperHopLength*inputStride)
@@ -29,7 +29,7 @@ type alignmentWord struct {
 }
 
 // findAlignment computes word-level timing and probability from CTranslate2's
-// align output. This is a direct port of Python's find_alignment.
+// align output, producing per-word start/end times and probabilities.
 func (m *Model) findAlignment(
 	enc *ct2bridge.EncoderOutput,
 	textTokens []int32,
@@ -132,8 +132,8 @@ func (m *Model) findAlignment(
 }
 
 // addWordTimestamps computes word-level timestamps for segments, applies
-// duration truncation hacks, merge_punctuations, and segment boundary
-// adjustment. This is a port of Python's add_word_timestamps.
+// duration truncation hacks, punctuation merging, and segment boundary
+// adjustment.
 //
 // It modifies segments in place (setting Words, and adjusting Start/End)
 // and returns the updated lastSpeechTimestamp.
@@ -298,7 +298,7 @@ func (m *Model) buildAlignStartSequence(lang string, taskToken int32) []int32 {
 }
 
 // mergePunctuationsOnAlignment merges punctuation-only alignment words with
-// their neighbors, matching Python's merge_punctuations. Words at this stage
+// their neighbors. Words at this stage
 // still have their BPE-decoded leading spaces.
 func mergePunctuationsOnAlignment(alignment []alignmentWord, prependChars, appendChars string) {
 	if len(alignment) <= 1 {

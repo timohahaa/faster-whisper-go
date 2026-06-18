@@ -343,7 +343,7 @@ func (m *Model) processWindow(p processWindowParams) (windowResult, error) {
 }
 
 // applyHallucinationSilence drops anomalous segments that are surrounded by
-// silence (a port of faster-whisper's hallucination filtering). It returns the
+// silence (Whisper's hallucination filtering heuristic). It returns the
 // possibly-truncated segments and the adjusted seek position. When skipWindow is
 // true the caller should discard this window entirely and resume from seek.
 func (m *Model) applyHallucinationSilence(

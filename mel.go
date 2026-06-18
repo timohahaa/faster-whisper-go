@@ -24,7 +24,7 @@ type melFilterSpan struct {
 }
 
 // Slaney mel-scale parameters: linear below melMinLogHz, logarithmic above.
-// These match librosa / faster-whisper's FeatureExtractor mel scale.
+// This is the standard mel scale used by Whisper's feature extractor.
 const (
 	melFMin      = 0.0
 	melFSp       = 200.0 / 3.0
@@ -55,7 +55,7 @@ func slaneyHzFromMel(mel float64) float64 {
 // using the Slaney mel scale (linear below 1000 Hz, logarithmic above).
 // Returns a flat slice of length nMels*(nFFT/2+1), row-major (mel bin major).
 //
-// This matches the Python faster-whisper FeatureExtractor.get_mel_filters exactly.
+// This builds Whisper's mel filterbank used by the feature extractor.
 func computeMelFilterbank(nMels, nFFT, sampleRate int) []float32 {
 	freqBins := nFFT/2 + 1
 
@@ -172,12 +172,12 @@ func computeMelSpectrogram(samples []float32, nMels int, sparse []melFilterSpan)
 }
 
 // computeChunkMel computes the mel spectrogram for a single audio chunk,
-// drops the last frame (matching Python's feature_extractor(chunk)[..., :-1]),
+// drops the last frame (Whisper's feature extractor discards the final frame),
 // and pads/trims to exactly whisperNFrames frames.
 // Returns a flat [nMels * whisperNFrames] slice suitable for batch stacking.
 func computeChunkMel(samples []float32, nMels int, sparse []melFilterSpan) []float32 {
 	mel, totalFrames := computeMelSpectrogram(samples, nMels, sparse)
-	// Drop last frame to match Python behavior.
+	// Drop the last frame to match Whisper's feature extractor.
 	frames := totalFrames - 1
 	if frames < 0 {
 		frames = 0

@@ -68,7 +68,8 @@ type SpeechChunk struct {
 
 // GetSpeechTimestamps detects speech regions in 16kHz mono float32 audio.
 // Returns a slice of SpeechChunk with start/end in sample indices.
-// This is a direct port of Python faster-whisper's get_speech_timestamps.
+// It applies the Silero VAD probabilities with hysteresis thresholding,
+// min/max duration limits and silence padding.
 func GetSpeechTimestamps(samples []float32, cfg VadConfig) ([]SpeechChunk, error) {
 	cfg.applyDefaults()
 
@@ -237,7 +238,7 @@ type chunkMetadata struct {
 
 // collectChunksBatched groups speech chunks into audio segments of at most
 // maxDuration seconds. Returns the audio buffers and their metadata.
-// This is a port of Python's collect_chunks with max_duration.
+// Chunks are merged greedily until adding the next one would exceed maxDuration.
 func collectChunksBatched(samples []float32, chunks []SpeechChunk, maxDuration float64) ([][]float32, []chunkMetadata) {
 	if len(chunks) == 0 {
 		return [][]float32{{}}, []chunkMetadata{{}}

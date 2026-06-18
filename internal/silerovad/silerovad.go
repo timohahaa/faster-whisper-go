@@ -1,7 +1,6 @@
 // Package silerovad runs the Silero VAD v6 model via onnxruntime to compute
-// per-window speech probabilities. It is a direct port of faster-whisper's
-// SileroVADModel.__call__, which feeds all windows through the model in a single
-// batched call (chunked) rather than one window at a time.
+// per-window speech probabilities. It feeds all windows through the model in a
+// single batched call (chunked) rather than one window at a time.
 package silerovad
 
 import (
@@ -121,7 +120,7 @@ func setup() {
 
 // Probs returns one speech probability per 512-sample window. The input is
 // zero-padded to a multiple of the window size, so the result length is
-// ceil(len(samples)/512). It mirrors faster-whisper's SileroVADModel.__call__.
+// ceil(len(samples)/512).
 func Probs(samples []float32) ([]float32, error) {
 	initOnce.Do(setup)
 	if initErr != nil {
@@ -141,7 +140,7 @@ func Probs(samples []float32) ([]float32, error) {
 
 	// Build the (n, contextSamples+windowSamples) batched input: each row is the
 	// trailing context of the previous window followed by the current window.
-	// Row 0's context is zero (matches Python's zeroed + rolled context).
+	// Row 0's context is zero; subsequent rows reuse the previous window's tail.
 	rowLen := contextSamples + windowSamples
 	batched := make([]float32, n*rowLen)
 	for i := 0; i < n; i++ {

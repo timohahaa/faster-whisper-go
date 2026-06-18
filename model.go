@@ -17,8 +17,8 @@ type Model struct {
 
 // Load opens a Whisper model. modelSizeOrPath is either a known model size
 // (e.g. "tiny", "large-v3", "turbo") or a path to a local CTranslate2 model
-// directory. When a size name is given, the model is downloaded from HuggingFace
-// Hub and cached locally.
+// directory. When a size name is given, the model is downloaded and cached
+// locally.
 func Load(modelSizeOrPath string, cfg ModelConfig) (*Model, error) {
 	modelDir, err := resolveModelPath(modelSizeOrPath, cfg)
 	if err != nil {
