@@ -188,8 +188,8 @@ func TestApplyVadDefaults(t *testing.T) {
 	if cfg.MinSilenceAtMaxSpeech != 98 {
 		t.Errorf("MinSilenceAtMaxSpeech: expected 98, got %d", cfg.MinSilenceAtMaxSpeech)
 	}
-	if cfg.UseMaxPossSilAtMaxSpeech == nil || !*cfg.UseMaxPossSilAtMaxSpeech {
-		t.Error("UseMaxPossSilAtMaxSpeech: expected true")
+	if cfg.UseMaxPossSilAtMaxSpeech {
+		t.Error("UseMaxPossSilAtMaxSpeech: expected false")
 	}
 }
 

@@ -83,9 +83,8 @@ func setup() {
 		return
 	}
 	defer opts.Destroy()
-	// Silero VAD is tiny; keep it on CPU. A single batched Run already lets
-	// onnxruntime parallelize internally across intra-op threads.
-	_ = opts.SetIntraOpNumThreads(0) // 0 = onnxruntime default (all cores)
+
+	_ = opts.SetIntraOpNumThreads(1)
 	_ = opts.SetInterOpNumThreads(1)
 
 	session, err = ort.NewDynamicAdvancedSessionWithONNXData(

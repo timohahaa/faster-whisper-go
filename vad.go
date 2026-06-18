@@ -30,8 +30,8 @@ type VadConfig struct {
 	// MaxSpeechDurationS is reached. Default: 98.
 	MinSilenceAtMaxSpeech int
 	// UseMaxPossSilAtMaxSpeech: when true, split at the longest silence found
-	// (not just the last one). Default: true.
-	UseMaxPossSilAtMaxSpeech *bool
+	// (not just the last one). Default: false.
+	UseMaxPossSilAtMaxSpeech bool
 }
 
 func (c *VadConfig) applyDefaults() {
@@ -52,9 +52,6 @@ func (c *VadConfig) applyDefaults() {
 	}
 	if c.MinSilenceAtMaxSpeech == 0 {
 		c.MinSilenceAtMaxSpeech = 98
-	}
-	if c.UseMaxPossSilAtMaxSpeech == nil {
-		c.UseMaxPossSilAtMaxSpeech = ptrBool(true)
 	}
 }
 
@@ -125,7 +122,7 @@ func GetSpeechTimestamps(samples []float32, cfg VadConfig) ([]SpeechChunk, error
 		}
 
 		if triggered && currentSpeech != nil && curSample-currentSpeech.Start > int(maxSpeechSamples) {
-			if *cfg.UseMaxPossSilAtMaxSpeech && len(possibleEnds) > 0 {
+			if cfg.UseMaxPossSilAtMaxSpeech && len(possibleEnds) > 0 {
 				best := possibleEnds[0]
 				for _, pe := range possibleEnds[1:] {
 					if pe.dur > best.dur {
@@ -181,7 +178,7 @@ func GetSpeechTimestamps(samples []float32, cfg VadConfig) ([]SpeechChunk, error
 			}
 			silDurNow := curSample - tempEnd
 
-			if !*cfg.UseMaxPossSilAtMaxSpeech && silDurNow > int(minSilenceSamplesAtMaxSpeech) {
+			if !cfg.UseMaxPossSilAtMaxSpeech && silDurNow > int(minSilenceSamplesAtMaxSpeech) {
 				prevEnd = tempEnd
 			}
 

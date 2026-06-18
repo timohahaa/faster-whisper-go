@@ -106,14 +106,18 @@ All parameters live in `config.json` and are applied identically on both sides.
 | `condition_on_previous_text` | feed previous text as prompt | `true` |
 | `vad.threshold` | speech probability threshold | `0.5` |
 | `vad.min_speech_duration_ms` | drop speech chunks shorter than this | `0` |
-| `vad.max_speech_duration_s` | split chunks longer than this (`0` = no limit) | `0` |
+| `vad.max_speech_duration_s` | split chunks longer than this (`0` = no limit) | `30` |
 | `vad.min_silence_duration_ms` | silence before splitting a chunk | `2000` |
 | `vad.speech_pad_ms` | padding added to each side of a chunk | `400` |
 | `datadir` | directory of the input WAV files | `../.testdata` |
 | `files` | list of `{ path, language }` (empty language = auto-detect) | — |
 
-`vad.max_speech_duration_s = 0` is mapped to unlimited (`+Inf`) on both sides,
-matching the faster-whisper default.
+In batched mode each VAD speech chunk is capped at the 30s `chunk_length`: the Go
+port does this unconditionally, faster-whisper only when `vad_parameters` is `None`
+or a `dict`. This benchmark passes a `VadOptions` object, so faster-whisper skips
+the cap; with `0` (`+Inf`) it then emits chunks longer than 30s and transcribes
+only the first 30s of each, dropping the rest. Use `30` here. In sequential mode
+the value only shifts VAD segment boundaries and never drops audio.
 
 ## Reading the output
 
