@@ -19,12 +19,12 @@ func (t *tokenizer) SplitSegmentsByTimestamps(
 	seek int,
 ) segmentSplitResult {
 	singleTimestampEnding := len(tokens) >= 2 &&
-		tokens[len(tokens)-2] < tokenTimestampBeg &&
-		tokens[len(tokens)-1] >= tokenTimestampBeg
+		tokens[len(tokens)-2] < t.timestampBegin &&
+		tokens[len(tokens)-1] >= t.timestampBegin
 
 	var consecutiveTimestamps []int
 	for i := 1; i < len(tokens); i++ {
-		if tokens[i] >= tokenTimestampBeg && tokens[i-1] >= tokenTimestampBeg {
+		if tokens[i] >= t.timestampBegin && tokens[i-1] >= t.timestampBegin {
 			consecutiveTimestamps = append(consecutiveTimestamps, i)
 		}
 	}
@@ -40,8 +40,8 @@ func (t *tokenizer) SplitSegmentsByTimestamps(
 		lastSlice := 0
 		for _, currentSlice := range slices {
 			slicedTokens := tokens[lastSlice:currentSlice]
-			startPos := slicedTokens[0] - tokenTimestampBeg
-			endPos := slicedTokens[len(slicedTokens)-1] - tokenTimestampBeg
+			startPos := slicedTokens[0] - t.timestampBegin
+			endPos := slicedTokens[len(slicedTokens)-1] - t.timestampBegin
 			startTime := timeOffset + float64(startPos)*timePrecision
 			endTime := timeOffset + float64(endPos)*timePrecision
 
@@ -56,19 +56,19 @@ func (t *tokenizer) SplitSegmentsByTimestamps(
 		if singleTimestampEnding {
 			seek += segmentSize
 		} else {
-			lastTSPos := tokens[lastSlice-1] - tokenTimestampBeg
+			lastTSPos := tokens[lastSlice-1] - t.timestampBegin
 			seek += int(lastTSPos) * inputStride
 		}
 	} else {
 		duration := segmentDuration
 		var timestamps []int32
 		for _, tok := range tokens {
-			if tok >= tokenTimestampBeg {
+			if tok >= t.timestampBegin {
 				timestamps = append(timestamps, tok)
 			}
 		}
-		if len(timestamps) > 0 && timestamps[len(timestamps)-1] != tokenTimestampBeg {
-			lastTSPos := timestamps[len(timestamps)-1] - tokenTimestampBeg
+		if len(timestamps) > 0 && timestamps[len(timestamps)-1] != t.timestampBegin {
+			lastTSPos := timestamps[len(timestamps)-1] - t.timestampBegin
 			duration = float64(lastTSPos) * timePrecision
 		}
 

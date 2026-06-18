@@ -634,14 +634,29 @@ ct2_encoder_output* ct2_encoder_output_slice(
 
         ctranslate2::dim_t seq_len = shape.size() >= 2 ? shape[1] : 1;
         ctranslate2::dim_t feat_dim = shape.size() >= 3 ? shape[2] : 1;
-        size_t stride = static_cast<size_t>(seq_len) * static_cast<size_t>(feat_dim);
-        size_t offset = index * stride;
+        ctranslate2::dim_t stride = seq_len * feat_dim;
+        ctranslate2::dim_t offset = static_cast<ctranslate2::dim_t>(index) * stride;
 
-        const float* src = batch_enc->view.data<float>() + offset;
-        std::vector<float> data(src, src + stride);
-
+        // The batched encoder output keeps the model's native dtype/device
+        // (e.g. float16 on CUDA when compute_type=int8). Copy the requested
+        // item preserving both, instead of assuming a host float32 buffer.
+        const auto& src = batch_enc->view;
         ctranslate2::StorageView sliced(
-            {1, seq_len, feat_dim}, data, batch_enc->view.device());
+            {1, seq_len, feat_dim}, src.dtype(), src.device());
+        switch (src.dtype()) {
+            case ctranslate2::DataType::FLOAT32:
+                sliced.copy_from(src.data<float>() + offset, stride, src.device());
+                break;
+            case ctranslate2::DataType::FLOAT16:
+                sliced.copy_from(
+                    src.data<ctranslate2::float16_t>() + offset, stride, src.device());
+                break;
+            default:
+                set_error_out(error_out,
+                    "unsupported encoder output dtype for slice");
+                return nullptr;
+        }
+
         auto out = new ct2_encoder_output{std::move(sliced)};
         return out;
     } catch (const std::exception& e) {

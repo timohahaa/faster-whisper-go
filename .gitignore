@@ -18,3 +18,7 @@
 .DS_Store
 GO_WHISPER_CT2_DESIGN.md
 tmp/
+
+# Benchmarks
+benchmarks/results/
+benchmarks/.venv/

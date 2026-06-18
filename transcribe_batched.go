@@ -3,8 +3,12 @@ package whisper
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
+	"os"
+	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/timohahaa/faster-whisper-go/internal/ct2bridge"
@@ -32,6 +36,10 @@ func (m *Model) TranscribeBatched(ctx context.Context, samples []float32, cfg Tr
 	if cfg.ChunkLength == 0 {
 		cfg.ChunkLength = whisperChunkLen
 	}
+
+	prof := os.Getenv("WHISPER_PROFILE") != ""
+	var tVad, tMel, tEncode, tGenerate, tWord time.Duration
+	profStart := time.Now()
 
 	duration := time.Duration(float64(len(samples)) / whisperSampleRate * float64(time.Second))
 	chunkLength := cfg.ChunkLength
@@ -74,7 +82,9 @@ func (m *Model) TranscribeBatched(ctx context.Context, samples []float32, cfg Tr
 		}
 		vadCfg.applyDefaults()
 
+		vadStart := time.Now()
 		speechChunks = GetSpeechTimestamps(samples, *vadCfg)
+		tVad += time.Since(vadStart)
 
 		if len(speechChunks) == 0 {
 			durationSec := float64(len(samples)) / whisperSampleRate
@@ -91,15 +101,38 @@ func (m *Model) TranscribeBatched(ctx context.Context, samples []float32, cfg Tr
 		durationAfterVad += time.Duration(float64(chunk.End-chunk.Start) / whisperSampleRate * float64(time.Second))
 	}
 
-	// Compute mel features for each chunk.
+	// Compute mel features for each chunk. Chunks are independent, so spread
+	// the (pure-Go, CPU-bound) STFT + mel filterbank work across all cores.
+	melStart := time.Now()
 	melChunks := make([][]float32, len(audioChunks))
-	for i, audio := range audioChunks {
-		if len(audio) > 0 {
-			melChunks[i] = computeChunkMel(audio, m.nMels, m.sparseFilters)
-		} else {
-			melChunks[i] = make([]float32, m.nMels*whisperNFrames)
-		}
+	melWorkers := runtime.GOMAXPROCS(0)
+	if melWorkers > len(audioChunks) {
+		melWorkers = len(audioChunks)
 	}
+	if melWorkers < 1 {
+		melWorkers = 1
+	}
+	var melWG sync.WaitGroup
+	melIdx := make(chan int, len(audioChunks))
+	for i := range audioChunks {
+		melIdx <- i
+	}
+	close(melIdx)
+	for w := 0; w < melWorkers; w++ {
+		melWG.Add(1)
+		go func() {
+			defer melWG.Done()
+			for i := range melIdx {
+				if audio := audioChunks[i]; len(audio) > 0 {
+					melChunks[i] = computeChunkMel(audio, m.nMels, m.sparseFilters)
+				} else {
+					melChunks[i] = make([]float32, m.nMels*whisperNFrames)
+				}
+			}
+		}()
+	}
+	melWG.Wait()
+	tMel += time.Since(melStart)
 
 	// Detect language if needed.
 	lang := cfg.Language
@@ -137,7 +170,7 @@ func (m *Model) TranscribeBatched(ctx context.Context, samples []float32, cfg Tr
 		previousTokens = m.tokenizer.Encode(" " + strings.TrimSpace(cfg.InitialPrompt))
 	}
 
-	taskToken := tokenTranscribe
+	taskToken := m.tokenizer.transcribe
 
 	basePrompt := m.buildBatchedPrompt(lang, previousTokens, cfg, taskToken)
 
@@ -182,10 +215,12 @@ func (m *Model) TranscribeBatched(ctx context.Context, samples []float32, cfg Tr
 		batchSize := len(batchMels)
 
 		flatMel := stackMelBatch(batchMels)
+		encStart := time.Now()
 		enc, err := m.bridge.EncodeBatch(flatMel, batchSize, m.nMels, whisperNFrames)
 		if err != nil {
 			return nil, err
 		}
+		tEncode += time.Since(encStart)
 
 		// Build per-item prompts.
 		prompts := make([][]int32, batchSize)
@@ -224,11 +259,13 @@ func (m *Model) TranscribeBatched(ctx context.Context, samples []float32, cfg Tr
 			}
 		}
 
+		genStart := time.Now()
 		batchResult, err := m.bridge.GenerateBatch(enc, prompts, opts)
 		if err != nil {
 			enc.Free()
 			return nil, err
 		}
+		tGenerate += time.Since(genStart)
 
 		// Post-process each item: split by timestamps, build segments.
 		type chunkSegments struct {
@@ -292,6 +329,7 @@ func (m *Model) TranscribeBatched(ctx context.Context, samples []float32, cfg Tr
 		}
 
 		// Word timestamps: process per-chunk using sliced encoder output.
+		wordStart := time.Now()
 		if cfg.WordTimestamps && !cfg.DisableTimestamps {
 			for i := range batchSize {
 				cr := &chunkResults[i]
@@ -315,6 +353,7 @@ func (m *Model) TranscribeBatched(ctx context.Context, samples []float32, cfg Tr
 				slicedEnc.Free()
 			}
 		}
+		tWord += time.Since(wordStart)
 
 		enc.Free()
 
@@ -329,6 +368,15 @@ func (m *Model) TranscribeBatched(ctx context.Context, samples []float32, cfg Tr
 		for i := range allSegments {
 			tsMap.restoreSegmentTimestamps(&allSegments[i])
 		}
+	}
+
+	if prof {
+		total := time.Since(profStart)
+		other := total - tVad - tMel - tEncode - tGenerate - tWord
+		fmt.Fprintf(os.Stderr,
+			"[profile] total=%.2fs vad=%.2fs mel=%.2fs encode=%.2fs generate=%.2fs word=%.2fs other=%.2fs (chunks=%d)\n",
+			total.Seconds(), tVad.Seconds(), tMel.Seconds(), tEncode.Seconds(),
+			tGenerate.Seconds(), tWord.Seconds(), other.Seconds(), len(audioChunks))
 	}
 
 	var textBuf strings.Builder
@@ -368,7 +416,7 @@ func (m *Model) buildBatchedPrompt(lang string, previousTokens []int32, cfg Tran
 	var prompt []int32
 
 	if len(previousTokens) > 0 || (cfg.Hotwords != "") {
-		prompt = append(prompt, tokenSOTprev)
+		prompt = append(prompt, m.tokenizer.sotPrev)
 
 		if cfg.Hotwords != "" {
 			hw := m.tokenizer.Encode(" " + strings.TrimSpace(cfg.Hotwords))
@@ -398,9 +446,12 @@ func (m *Model) buildBatchedPrompt(lang string, previousTokens []int32, cfg Tran
 		prompt = append(prompt, taskToken)
 	}
 
-	if cfg.DisableTimestamps {
-		prompt = append(prompt, tokenNoTimestamps)
-	}
+	// Batched mode always decodes without timestamp tokens, matching
+	// faster-whisper's BatchedInferencePipeline (without_timestamps=True):
+	// coarse segment boundaries come from the VAD chunks and word-level timing
+	// from the separate alignment pass, so emitting timestamp tokens here only
+	// lengthens the decoded sequence and slows generation for no benefit.
+	prompt = append(prompt, m.tokenizer.noTimestamps)
 
 	return prompt
 }

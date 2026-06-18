@@ -77,6 +77,9 @@ func makeTestTokenizer() *tokenizer {
 	addToken(tokenSOTprev, "<|startofprev|>")
 	addToken(tokenSOTlm, "<|startoflm|>")
 	addToken(tokenNoSpeech, "<|nospeech|>")
+	addToken(tokenNoTimestamps, "<|notimestamps|>")
+
+	tok.initSpecialTokens()
 
 	return tok
 }

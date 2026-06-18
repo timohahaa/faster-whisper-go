@@ -11,13 +11,13 @@ import (
 // Transcribe runs speech recognition on PCM audio samples (16kHz, mono, float32).
 // Handles audio of any length via an internal sliding window.
 func (m *Model) Transcribe(ctx context.Context, samples []float32, cfg TranscribeConfig) (*Result, error) {
-	return m.infer(ctx, samples, cfg, tokenTranscribe)
+	return m.infer(ctx, samples, cfg, m.tokenizer.transcribe)
 }
 
 // Translate runs speech recognition and translates the result into English.
 // Handles audio of any length via an internal sliding window.
 func (m *Model) Translate(ctx context.Context, samples []float32, cfg TranscribeConfig) (*Result, error) {
-	return m.infer(ctx, samples, cfg, tokenTranslate)
+	return m.infer(ctx, samples, cfg, m.tokenizer.translate)
 }
 
 func (m *Model) infer(ctx context.Context, samples []float32, cfg TranscribeConfig, taskToken int32) (*Result, error) {
@@ -392,7 +392,7 @@ func (m *Model) buildPrompt(lang string, previousTokens []int32, cfg TranscribeC
 	}
 
 	if len(previousTokens) > 0 || (cfg.Hotwords != "" && prefix == "") {
-		prompt = append(prompt, tokenSOTprev)
+		prompt = append(prompt, m.tokenizer.sotPrev)
 
 		if cfg.Hotwords != "" && prefix == "" {
 			hw := m.tokenizer.Encode(" " + strings.TrimSpace(cfg.Hotwords))
@@ -423,7 +423,7 @@ func (m *Model) buildPrompt(lang string, previousTokens []int32, cfg TranscribeC
 	}
 
 	if cfg.DisableTimestamps {
-		prompt = append(prompt, tokenNoTimestamps)
+		prompt = append(prompt, m.tokenizer.noTimestamps)
 	}
 
 	if prefix != "" {
@@ -433,7 +433,7 @@ func (m *Model) buildPrompt(lang string, previousTokens []int32, cfg TranscribeC
 			prefixTokens = prefixTokens[:maxPrefix-1]
 		}
 		if !cfg.DisableTimestamps {
-			prompt = append(prompt, tokenTimestampBeg)
+			prompt = append(prompt, m.tokenizer.timestampBegin)
 		}
 		prompt = append(prompt, prefixTokens...)
 	}

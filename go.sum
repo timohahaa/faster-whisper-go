@@ -1,4 +1,4 @@
-github.com/zserge/govad v0.0.0-20260330155402-74750eabf3a4 h1:C+qXvLKxPHy1ATWWF+mAIp/5JtLawNahy/ICPPVrgPg=
-github.com/zserge/govad v0.0.0-20260330155402-74750eabf3a4/go.mod h1:e0lKrmGHlIQjttwSN+Ojgrj7P25o5w9jYOlAkyQ6JFk=
+github.com/yalue/onnxruntime_go v1.30.1 h1:NaEng5lWbsHZ/8X1dtaw1mIj7eV1ozyjbFo//g0ktl4=
+github.com/yalue/onnxruntime_go v1.30.1/go.mod h1:b4X26A8pekNb1ACJ58wAXgNKeUCGEAQ9dmACut9Sm/4=
 gonum.org/v1/gonum v0.17.0 h1:VbpOemQlsSMrYmn7T2OUvQ4dqxQXU+ouZFQsZOx50z4=
 gonum.org/v1/gonum v0.17.0/go.mod h1:El3tOrEuMpv2UdMrbNlKEh9vd86bmQ6vqIcDwxEOc1E=

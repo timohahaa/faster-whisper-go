@@ -19,7 +19,13 @@ import (
 // optional-space + digits, optional-space + punctuation/symbols, whitespace runs.
 var gpt2PreTokenizer = regexp.MustCompile(`'s|'t|'re|'ve|'m|'ll|'d| ?\pL+| ?\pN+| ?[^\s\pL\pN]+|\s+`)
 
-// Well-known Whisper special token offsets (relative to base vocab size of 50257).
+// Well-known Whisper special token IDs. tokenEOT and tokenSOT sit immediately
+// after the 50257-entry base vocabulary and are the same for every Whisper
+// model. The remaining special tokens come after the language-token block,
+// whose size differs between models (99 languages for large-v2, 100 for
+// large-v3/turbo), so their concrete IDs are resolved per-model from the
+// tokenizer in initSpecialTokens. The constants below are the large-v2 layout
+// and serve only as a fallback when a model is missing the named tokens.
 const (
 	tokenEOT          int32 = 50257
 	tokenSOT          int32 = 50258
@@ -29,7 +35,7 @@ const (
 	tokenTimestampBeg int32 = 50364
 )
 
-// Task tokens.
+// Task tokens (large-v2 fallback layout, see note above).
 const (
 	tokenTranslate  int32 = 50358
 	tokenTranscribe int32 = 50359
@@ -47,6 +53,38 @@ type tokenizer struct {
 	byteDecoder     [512]byte
 	byteEncoder     map[byte]rune
 	nonSpeechTokens []int32
+
+	// Per-model special token IDs, resolved by initSpecialTokens. These vary
+	// with the language-block size (e.g. large-v3 shifts them by +1 vs v2).
+	transcribe     int32
+	translate      int32
+	sotLm          int32
+	sotPrev        int32
+	noSpeech       int32
+	noTimestamps   int32
+	timestampBegin int32
+}
+
+// initSpecialTokens resolves model-specific special token IDs from the loaded
+// vocabulary, falling back to the large-v2 constants when a token is absent.
+// This keeps timestamp parsing and prompt construction correct across model
+// variants whose language-token block differs in size.
+func (t *tokenizer) initSpecialTokens() {
+	resolve := func(fallback int32, contents ...string) int32 {
+		for _, c := range contents {
+			if id, ok := t.tokenToID[c]; ok {
+				return id
+			}
+		}
+		return fallback
+	}
+	t.transcribe = resolve(tokenTranscribe, "<|transcribe|>")
+	t.translate = resolve(tokenTranslate, "<|translate|>")
+	t.sotLm = resolve(tokenSOTlm, "<|startoflm|>")
+	t.sotPrev = resolve(tokenSOTprev, "<|startofprev|>")
+	t.noSpeech = resolve(tokenNoSpeech, "<|nospeech|>", "<|nocaptions|>")
+	t.noTimestamps = resolve(tokenNoTimestamps, "<|notimestamps|>")
+	t.timestampBegin = resolve(tokenTimestampBeg, "<|0.00|>")
 }
 
 // loadTokenizer parses tokenizer.json from a model directory.
@@ -99,6 +137,8 @@ func loadTokenizer(modelDir string) (*tokenizer, error) {
 		}
 	}
 
+	t.initSpecialTokens()
+
 	return t, nil
 }
 
@@ -124,8 +164,8 @@ func (t *tokenizer) Decode(ids []int32) string {
 func (t *tokenizer) decodeWithTimestamps(ids []int32) string {
 	var buf strings.Builder
 	for _, id := range ids {
-		if id >= tokenTimestampBeg {
-			ts := float64(id-tokenTimestampBeg) * timePrecision
+		if id >= t.timestampBegin {
+			ts := float64(id-t.timestampBegin) * timePrecision
 			fmt.Fprintf(&buf, "<|%.2f|>", ts)
 			continue
 		}
@@ -403,9 +443,9 @@ func (t *tokenizer) SuppressedTokens(suppress []int32) []int32 {
 	}
 
 	for _, tok := range []int32{
-		tokenTranscribe, tokenTranslate,
-		tokenSOT, tokenSOTprev, tokenSOTlm,
-		tokenNoSpeech,
+		t.transcribe, t.translate,
+		tokenSOT, t.sotPrev, t.sotLm,
+		t.noSpeech,
 	} {
 		set[tok] = true
 	}

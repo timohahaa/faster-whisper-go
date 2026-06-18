@@ -5,7 +5,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/zserge/govad"
+	"github.com/timohahaa/faster-whisper-go/internal/silerovad"
 )
 
 // VadConfig controls Voice Activity Detection parameters.
@@ -58,7 +58,7 @@ func (c *VadConfig) applyDefaults() {
 	}
 }
 
-const vadWindowSize = 512 // samples per VAD frame (govad.SamplesPerFrame)
+const vadWindowSize = 512 // samples per VAD frame (Silero window size)
 
 // SpeechChunk represents a contiguous region of speech in sample indices.
 type SpeechChunk struct {
@@ -229,24 +229,13 @@ func GetSpeechTimestamps(samples []float32, cfg VadConfig) []SpeechChunk {
 	return speeches
 }
 
-// getSpeechProbs runs the Silero VAD model on audio and returns per-frame speech probabilities.
+// getSpeechProbs runs the Silero VAD model on audio and returns per-frame speech
+// probabilities (one per 512-sample window). The whole signal is processed in a
+// single batched onnxruntime call, matching faster-whisper.
 func getSpeechProbs(samples []float32) []float32 {
-	v, err := govad.New()
+	probs, err := silerovad.Probs(samples)
 	if err != nil {
 		return nil
-	}
-
-	padLen := vadWindowSize - len(samples)%vadWindowSize
-	if padLen < vadWindowSize {
-		padded := make([]float32, len(samples)+padLen)
-		copy(padded, samples)
-		samples = padded
-	}
-
-	nFrames := len(samples) / vadWindowSize
-	probs := make([]float32, nFrames)
-	for i := range nFrames {
-		probs[i] = v.Process(samples[i*vadWindowSize : (i+1)*vadWindowSize])
 	}
 	return probs
 }
