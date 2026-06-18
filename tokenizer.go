@@ -29,7 +29,7 @@ type tokenizer struct {
 	mergeRank       map[string]int
 	byteEncoder     [256]rune  // byte -> printable rune
 	byteDecoder     [512]int16 // printable rune -> byte, -1 if unmapped
-	nonSpeechTokens []int32
+	nonSpeechCache  []int32
 
 	// Per-model special token IDs, all resolved from the loaded vocabulary by
 	// initSpecialTokens. Concrete IDs vary with the language-block size (e.g.
@@ -135,8 +135,8 @@ func loadTokenizer(modelDir string) (*tokenizer, error) {
 	return t, nil
 }
 
-// Decode converts token IDs into text, skipping special tokens.
-func (t *tokenizer) Decode(ids []int32) string {
+// decode converts token IDs into text, skipping special tokens.
+func (t *tokenizer) decode(ids []int32) string {
 	var buf strings.Builder
 	buf.Grow(len(ids) * 4)
 	for _, id := range ids {
@@ -266,11 +266,11 @@ func isPunctuationChar(s string) bool {
 	return strings.ContainsAny(s, punctuation)
 }
 
-// Encode converts text into token IDs using GPT-2 BPE with regex pre-tokenization.
+// encode converts text into token IDs using GPT-2 BPE with regex pre-tokenization.
 // The input is first split into chunks by the GPT-2 regex (contractions, words,
 // numbers, punctuation, whitespace), then each chunk is byte-level BPE-encoded
 // independently — matching the HuggingFace/Python tokenizer behavior.
-func (t *tokenizer) Encode(text string) []int32 {
+func (t *tokenizer) encode(text string) []int32 {
 	if text == "" {
 		return nil
 	}
@@ -348,12 +348,12 @@ func (t *tokenizer) bpeEncode(word string) []int32 {
 	return ids
 }
 
-// NonSpeechTokens returns the standard set of token IDs to suppress
+// nonSpeechTokens returns the standard set of token IDs to suppress
 // to avoid non-speech annotations like ♪♪♪, (SPEAKING FOREIGN LANGUAGE), [DAVID], etc.
 // The result is cached after the first computation.
-func (t *tokenizer) NonSpeechTokens() []int32 {
-	if t.nonSpeechTokens != nil {
-		return t.nonSpeechTokens
+func (t *tokenizer) nonSpeechTokens() []int32 {
+	if t.nonSpeechCache != nil {
+		return t.nonSpeechCache
 	}
 
 	symbols := []string{
@@ -370,11 +370,11 @@ func (t *tokenizer) NonSpeechTokens() []int32 {
 
 	resultSet := make(map[int32]bool)
 
-	dashTokens := t.Encode(" -")
+	dashTokens := t.encode(" -")
 	if len(dashTokens) > 0 {
 		resultSet[dashTokens[0]] = true
 	}
-	quoteTokens := t.Encode(" '")
+	quoteTokens := t.encode(" '")
 	if len(quoteTokens) > 0 {
 		resultSet[quoteTokens[0]] = true
 	}
@@ -392,7 +392,7 @@ func (t *tokenizer) NonSpeechTokens() []int32 {
 
 	for _, sym := range allSymbols {
 		for _, variant := range []string{sym, " " + sym} {
-			tokens := t.Encode(variant)
+			tokens := t.encode(variant)
 			if len(tokens) == 1 || isMisc(sym) {
 				if len(tokens) > 0 {
 					resultSet[tokens[0]] = true
@@ -402,13 +402,13 @@ func (t *tokenizer) NonSpeechTokens() []int32 {
 	}
 
 	result := slices.Sorted(maps.Keys(resultSet))
-	t.nonSpeechTokens = result
+	t.nonSpeechCache = result
 	return result
 }
 
-// SuppressedTokens expands the suppress list: -1 becomes the default non-speech set,
+// suppressedTokens expands the suppress list: -1 becomes the default non-speech set,
 // and always-suppressed special tokens are appended.
-func (t *tokenizer) SuppressedTokens(suppress []int32) []int32 {
+func (t *tokenizer) suppressedTokens(suppress []int32) []int32 {
 	set := make(map[int32]bool)
 
 	hasDefault := false
@@ -421,7 +421,7 @@ func (t *tokenizer) SuppressedTokens(suppress []int32) []int32 {
 	}
 
 	if hasDefault {
-		for _, tok := range t.NonSpeechTokens() {
+		for _, tok := range t.nonSpeechTokens() {
 			set[tok] = true
 		}
 	}
@@ -437,8 +437,8 @@ func (t *tokenizer) SuppressedTokens(suppress []int32) []int32 {
 	return slices.Sorted(maps.Keys(set))
 }
 
-// LanguageToken returns the token ID for a language code, or -1 if not found.
-func (t *tokenizer) LanguageToken(lang string) int32 {
+// languageToken returns the token ID for a language code, or -1 if not found.
+func (t *tokenizer) languageToken(lang string) int32 {
 	if id, ok := t.langToToken[lang]; ok {
 		return id
 	}

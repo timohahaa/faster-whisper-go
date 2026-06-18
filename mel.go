@@ -9,8 +9,8 @@ const (
 	// sampleRate * chunkLen / hopLength = 16000 * 30 / 160 = 3000.
 	whisperNFrames = 3000
 
-	timePerFrame      = float64(whisperHopLength) / float64(whisperSampleRate)
-	framesPerSecond   = float64(whisperSampleRate) / float64(whisperHopLength)
+	timePerFrame    = float64(whisperHopLength) / float64(whisperSampleRate)
+	framesPerSecond = float64(whisperSampleRate) / float64(whisperHopLength)
 	// inputStride is the encoder's temporal downsampling factor (conv layers reduce frames by 2x).
 	inputStride = 2
 )
@@ -21,6 +21,34 @@ const (
 type melFilterSpan struct {
 	start   int       // first non-zero freq bin index
 	weights []float32 // non-zero filter values (length = end-start)
+}
+
+// Slaney mel-scale parameters: linear below melMinLogHz, logarithmic above.
+// These match librosa / faster-whisper's FeatureExtractor mel scale.
+const (
+	melFMin      = 0.0
+	melFSp       = 200.0 / 3.0
+	melMinLogHz  = 1000.0
+	melMinLogMel = (melMinLogHz - melFMin) / melFSp
+)
+
+// melLogStep is the per-mel log frequency step above melMinLogHz.
+var melLogStep = math.Log(6.4) / 27.0
+
+// slaneyMelFromHz converts a frequency in Hz to the Slaney mel scale.
+func slaneyMelFromHz(hz float64) float64 {
+	if hz < melMinLogHz {
+		return (hz - melFMin) / melFSp
+	}
+	return melMinLogMel + math.Log(hz/melMinLogHz)/melLogStep
+}
+
+// slaneyHzFromMel converts a Slaney mel value back to a frequency in Hz.
+func slaneyHzFromMel(mel float64) float64 {
+	if mel < melMinLogMel {
+		return melFMin + melFSp*mel
+	}
+	return melMinLogHz * math.Exp(melLogStep*(mel-melMinLogMel))
 }
 
 // computeMelFilterbank builds a bank of nMels triangular band-pass filters
@@ -36,25 +64,14 @@ func computeMelFilterbank(nMels, nFFT, sampleRate int) []float32 {
 		fftfreqs[i] = float64(i) * float64(sampleRate) / float64(nFFT)
 	}
 
-	const (
-		minMel    = 0.0
-		maxMel    = 45.245640471924965
-		fMin      = 0.0
-		fSp       = 200.0 / 3.0
-		minLogHz  = 1000.0
-		minLogMel = (minLogHz - fMin) / fSp
-	)
-	logstep := math.Log(6.4) / 27.0
+	minMel := slaneyMelFromHz(melFMin)
+	maxMel := slaneyMelFromHz(float64(sampleRate) / 2)
 
 	nPoints := nMels + 2
 	freqs := make([]float64, nPoints)
 	for i := range nPoints {
 		m := minMel + float64(i)*(maxMel-minMel)/float64(nPoints-1)
-		if m < minLogMel {
-			freqs[i] = fMin + fSp*m
-		} else {
-			freqs[i] = minLogHz * math.Exp(logstep*(m-minLogMel))
-		}
+		freqs[i] = slaneyHzFromMel(m)
 	}
 
 	fdiff := make([]float64, nPoints-1)

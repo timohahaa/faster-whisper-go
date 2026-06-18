@@ -186,22 +186,22 @@ func TestDecodeTokenInto(t *testing.T) {
 func TestDecode(t *testing.T) {
 	tok := makeTestTokenizer()
 
-	got := tok.Decode([]int32{0, 1})
+	got := tok.decode([]int32{0, 1})
 	if got != "Hello world" {
 		t.Errorf("Decode([0,1]) = %q, want %q", got, "Hello world")
 	}
 
-	got = tok.Decode([]int32{0, tok.eot, 1})
+	got = tok.decode([]int32{0, tok.eot, 1})
 	if got != "Hello world" {
 		t.Errorf("Decode with special = %q, want %q", got, "Hello world")
 	}
 
-	got = tok.Decode([]int32{0, 99999, 1})
+	got = tok.decode([]int32{0, 99999, 1})
 	if got != "Hello world" {
 		t.Errorf("Decode with unknown = %q, want %q", got, "Hello world")
 	}
 
-	got = tok.Decode(nil)
+	got = tok.decode(nil)
 	if got != "" {
 		t.Errorf("Decode(nil) = %q, want empty", got)
 	}
@@ -216,7 +216,7 @@ func TestSplitSegmentsByTimestamps(t *testing.T) {
 		ts150 := tok.timestampBegin + 150 // 3.00
 
 		tokens := []int32{ts0, 0, 1, ts50, ts50, 2, 3, ts150, tok.eot}
-		result := tok.SplitSegmentsByTimestamps(tokens, 0.0, 3000, 30.0, 0)
+		result := tok.splitSegmentsByTimestamps(tokens, 0.0, 3000, 30.0, 0)
 
 		if len(result.segments) != 1 {
 			t.Fatalf("expected 1 segment, got %d", len(result.segments))
@@ -234,7 +234,7 @@ func TestSplitSegmentsByTimestamps(t *testing.T) {
 		ts150 := tok.timestampBegin + 150 // 3.00
 
 		tokens := []int32{ts0, 0, 1, ts50, ts50, 2, 3, ts150}
-		result := tok.SplitSegmentsByTimestamps(tokens, 0.0, 3000, 30.0, 0)
+		result := tok.splitSegmentsByTimestamps(tokens, 0.0, 3000, 30.0, 0)
 
 		if len(result.segments) != 2 {
 			t.Fatalf("expected 2 segments, got %d", len(result.segments))
@@ -259,7 +259,7 @@ func TestSplitSegmentsByTimestamps(t *testing.T) {
 		ts50 := tok.timestampBegin + 50
 
 		tokens := []int32{0, 1, ts50}
-		result := tok.SplitSegmentsByTimestamps(tokens, 0.0, 3000, 30.0, 0)
+		result := tok.splitSegmentsByTimestamps(tokens, 0.0, 3000, 30.0, 0)
 
 		if len(result.segments) != 1 {
 			t.Fatalf("expected 1 segment, got %d", len(result.segments))
@@ -271,7 +271,7 @@ func TestSplitSegmentsByTimestamps(t *testing.T) {
 
 	t.Run("NoTimestamps", func(t *testing.T) {
 		tokens := []int32{0, 1, 2, 3}
-		result := tok.SplitSegmentsByTimestamps(tokens, 5.0, 3000, 30.0, 500)
+		result := tok.splitSegmentsByTimestamps(tokens, 5.0, 3000, 30.0, 500)
 
 		if len(result.segments) != 1 {
 			t.Fatalf("expected 1 segment, got %d", len(result.segments))
@@ -289,7 +289,7 @@ func TestSplitSegmentsByTimestamps(t *testing.T) {
 		ts50 := tok.timestampBegin + 50
 
 		tokens := []int32{ts0, 0, ts50}
-		result := tok.SplitSegmentsByTimestamps(tokens, 10.0, 3000, 30.0, 1000)
+		result := tok.splitSegmentsByTimestamps(tokens, 10.0, 3000, 30.0, 1000)
 
 		if len(result.segments) != 1 {
 			t.Fatalf("expected 1 segment, got %d", len(result.segments))
@@ -307,7 +307,7 @@ func TestSuppressedTokens(t *testing.T) {
 	tok := makeTestTokenizer()
 
 	t.Run("DefaultExpansion", func(t *testing.T) {
-		result := tok.SuppressedTokens([]int32{-1})
+		result := tok.suppressedTokens([]int32{-1})
 
 		hasSpecial := func(id int32) bool {
 			for _, tok := range result {
@@ -326,7 +326,7 @@ func TestSuppressedTokens(t *testing.T) {
 	})
 
 	t.Run("ExplicitTokens", func(t *testing.T) {
-		result := tok.SuppressedTokens([]int32{42, 99})
+		result := tok.suppressedTokens([]int32{42, 99})
 
 		has42 := false
 		has99 := false
@@ -344,7 +344,7 @@ func TestSuppressedTokens(t *testing.T) {
 	})
 
 	t.Run("Sorted", func(t *testing.T) {
-		result := tok.SuppressedTokens([]int32{-1, 100, 50})
+		result := tok.suppressedTokens([]int32{-1, 100, 50})
 		for i := 1; i < len(result); i++ {
 			if result[i] <= result[i-1] {
 				t.Errorf("result not sorted at index %d: %d <= %d", i, result[i], result[i-1])
@@ -452,7 +452,7 @@ func TestEncode(t *testing.T) {
 	tok := makeTestTokenizer()
 
 	t.Run("Contractions", func(t *testing.T) {
-		ids := tok.Encode("I'm don't")
+		ids := tok.encode("I'm don't")
 		want := []int32{10, 11, 12, 13}
 		if !reflect.DeepEqual(ids, want) {
 			t.Errorf("Encode(\"I'm don't\") = %v, want %v", ids, want)
@@ -460,7 +460,7 @@ func TestEncode(t *testing.T) {
 	})
 
 	t.Run("MixedPunctuation", func(t *testing.T) {
-		ids := tok.Encode(" hello, world!")
+		ids := tok.encode(" hello, world!")
 		want := []int32{14, 15, 16, 17}
 		if !reflect.DeepEqual(ids, want) {
 			t.Errorf("Encode(\" hello, world!\") = %v, want %v", ids, want)
@@ -469,8 +469,8 @@ func TestEncode(t *testing.T) {
 
 	t.Run("RoundTrip", func(t *testing.T) {
 		text := " hello, world!"
-		ids := tok.Encode(text)
-		decoded := tok.Decode(ids)
+		ids := tok.encode(text)
+		decoded := tok.decode(ids)
 		if decoded != text {
 			t.Errorf("roundtrip: Encode+Decode(%q) = %q", text, decoded)
 		}
@@ -482,15 +482,14 @@ func BenchmarkEncode(b *testing.B) {
 
 	b.Run("Short", func(b *testing.B) {
 		for b.Loop() {
-			tok.Encode(" hello, world!")
+			tok.encode(" hello, world!")
 		}
 	})
 
 	b.Run("Long", func(b *testing.B) {
 		text := " This is a longer sentence that would be typical of transcription output from a whisper model."
 		for b.Loop() {
-			tok.Encode(text)
+			tok.encode(text)
 		}
 	})
 }
-

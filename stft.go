@@ -68,7 +68,7 @@ func stft(samples []float32, nFFT, hopLength, extraPadRight int) (power []float3
 
 	window := whisperHannWindow
 	freqBins := nFFT/2 + 1
-	nFrames = (paddedLen - nFFT) / hopLength + 1
+	nFrames = (paddedLen-nFFT)/hopLength + 1
 
 	st := fftPool.Get().(*fftState)
 	coeffBuf := st.coeffBuf

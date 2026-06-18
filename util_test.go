@@ -46,24 +46,23 @@ func TestPadOrTrim(t *testing.T) {
 
 func TestGetCompressionRatio(t *testing.T) {
 	t.Run("Empty", func(t *testing.T) {
-		if r := getCompressionRatio(""); r != 0 {
+		if r := compressionRatio(""); r != 0 {
 			t.Errorf("empty: got %f, want 0", r)
 		}
 	})
 
 	t.Run("Normal", func(t *testing.T) {
-		r := getCompressionRatio("Hello, this is a normal sentence with some text.")
+		r := compressionRatio("Hello, this is a normal sentence with some text.")
 		if r <= 0 {
 			t.Errorf("normal text: got %f, want > 0", r)
 		}
 	})
 
 	t.Run("Repetitive", func(t *testing.T) {
-		normal := getCompressionRatio("Hello, this is a normal sentence.")
-		repeated := getCompressionRatio("Hello Hello Hello Hello Hello Hello Hello Hello Hello Hello Hello Hello Hello Hello Hello Hello")
+		normal := compressionRatio("Hello, this is a normal sentence.")
+		repeated := compressionRatio("Hello Hello Hello Hello Hello Hello Hello Hello Hello Hello Hello Hello Hello Hello Hello Hello")
 		if repeated <= normal {
 			t.Errorf("repetitive text (%f) should have higher ratio than normal (%f)", repeated, normal)
 		}
 	})
 }
-

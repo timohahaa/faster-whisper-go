@@ -22,3 +22,4 @@ tmp/
 # Benchmarks
 benchmarks/results/
 benchmarks/.venv/
+benchmarks/run_full.log

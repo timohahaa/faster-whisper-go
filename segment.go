@@ -9,9 +9,9 @@ type segmentSplitResult struct {
 	singleTimestampEnding bool
 }
 
-// SplitSegmentsByTimestamps parses timestamp tokens to determine segment boundaries
+// splitSegmentsByTimestamps parses timestamp tokens to determine segment boundaries
 // and how far to advance the seek position, matching the Python _split_segments_by_timestamps.
-func (t *tokenizer) SplitSegmentsByTimestamps(
+func (t *tokenizer) splitSegmentsByTimestamps(
 	tokens []int32,
 	timeOffset float64,
 	segmentSize int,

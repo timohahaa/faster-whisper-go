@@ -62,29 +62,25 @@ func (m *Model) generateWithFallback(
 			return ct2bridge.GenerateResult{}, 0, 0, 0, err
 		}
 
-		var avgLogProb float32
-		if seqLen := len(genResult.SequenceIDs); seqLen > 0 {
-			cumLogProb := genResult.Score * float32(math.Pow(float64(seqLen), float64(*cfg.LengthPenalty)))
-			avgLogProb = cumLogProb / float32(seqLen+1)
-		}
+		avgLogProb := recoverAvgLogProb(genResult.Score, len(genResult.SequenceIDs), *cfg.LengthPenalty)
 
-		text := m.tokenizer.Decode(genResult.SequenceIDs)
-		compressionRatio := getCompressionRatio(text)
+		text := m.tokenizer.decode(genResult.SequenceIDs)
+		compRatio := compressionRatio(text)
 
-		fr := fallbackResult{
+		fb := fallbackResult{
 			genResult:        genResult,
 			avgLogProb:       avgLogProb,
 			temperature:      temp,
-			compressionRatio: compressionRatio,
+			compressionRatio: compRatio,
 		}
 
 		needsFallback := false
 
-		if *cfg.CompressionRatioThreshold > 0 && compressionRatio > *cfg.CompressionRatioThreshold {
+		if *cfg.CompressionRatioThreshold > 0 && compRatio > *cfg.CompressionRatioThreshold {
 			needsFallback = true
 		} else {
-			if bestBelowCR == nil || fr.avgLogProb > bestBelowCR.avgLogProb {
-				bestBelowCR = &fr
+			if bestBelowCR == nil || fb.avgLogProb > bestBelowCR.avgLogProb {
+				bestBelowCR = &fb
 			}
 		}
 
@@ -95,12 +91,12 @@ func (m *Model) generateWithFallback(
 			}
 		}
 
-		if best == nil || fr.avgLogProb > best.avgLogProb {
-			best = &fr
+		if best == nil || fb.avgLogProb > best.avgLogProb {
+			best = &fb
 		}
 
 		if !needsFallback {
-			return genResult, avgLogProb, temp, compressionRatio, nil
+			return genResult, avgLogProb, temp, compRatio, nil
 		}
 	}
 
@@ -112,6 +108,16 @@ func (m *Model) generateWithFallback(
 	// prompt_reset_on_temperature triggers correctly when all attempts failed.
 	lastTemp := cfg.Temperature[len(cfg.Temperature)-1]
 	return pick.genResult, pick.avgLogProb, lastTemp, pick.compressionRatio, nil
+}
+
+// recoverAvgLogProb reconstructs the average log probability from the score
+// returned by the decoder (which has the length penalty already applied).
+func recoverAvgLogProb(score float32, seqLen int, lengthPenalty float32) float32 {
+	if seqLen == 0 {
+		return 0
+	}
+	cumLogProb := score * float32(math.Pow(float64(seqLen), float64(lengthPenalty)))
+	return cumLogProb / float32(seqLen+1)
 }
 
 func shouldSkipSegment(genResult ct2bridge.GenerateResult, avgLogProb float32, cfg TranscribeConfig) bool {
@@ -140,18 +146,18 @@ type zlibState struct {
 	buf *bytes.Buffer
 }
 
-func getCompressionRatio(text string) float32 {
+func compressionRatio(text string) float32 {
 	raw := []byte(text)
 	if len(raw) == 0 {
 		return 0
 	}
-	st := zlibPool.Get().(*zlibState)
-	st.buf.Reset()
-	st.w.Reset(st.buf)
-	st.w.Write(raw)
-	st.w.Close()
-	compressed := st.buf.Len()
-	zlibPool.Put(st)
+	zlibSt := zlibPool.Get().(*zlibState)
+	zlibSt.buf.Reset()
+	zlibSt.w.Reset(zlibSt.buf)
+	zlibSt.w.Write(raw)
+	zlibSt.w.Close()
+	compressed := zlibSt.buf.Len()
+	zlibPool.Put(zlibSt)
 	if compressed == 0 {
 		return 0
 	}

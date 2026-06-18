@@ -8,10 +8,10 @@ import (
 
 // Model is a loaded Whisper model ready for transcription.
 type Model struct {
-	bridge        *ct2bridge.Model
-	tokenizer     *tokenizer
-	nMels         int
-	sparseFilters []melFilterSpan
+	bridge         *ct2bridge.Model
+	tokenizer      *tokenizer
+	nMels          int
+	sparseFilters  []melFilterSpan
 	isMultilingual bool
 }
 

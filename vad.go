@@ -69,7 +69,7 @@ type SpeechChunk struct {
 // GetSpeechTimestamps detects speech regions in 16kHz mono float32 audio.
 // Returns a slice of SpeechChunk with start/end in sample indices.
 // This is a direct port of Python faster-whisper's get_speech_timestamps.
-func GetSpeechTimestamps(samples []float32, cfg VadConfig) []SpeechChunk {
+func GetSpeechTimestamps(samples []float32, cfg VadConfig) ([]SpeechChunk, error) {
 	cfg.applyDefaults()
 
 	samplingRate := float64(whisperSampleRate)
@@ -82,12 +82,15 @@ func GetSpeechTimestamps(samples []float32, cfg VadConfig) []SpeechChunk {
 
 	audioLengthSamples := len(samples)
 
-	probs := getSpeechProbs(samples)
+	probs, err := silerovad.Probs(samples)
+	if err != nil {
+		return nil, err
+	}
 
 	triggered := false
 	var speeches []SpeechChunk
-	var currentSpeech SpeechChunk
-	currentSpeechActive := false
+	// currentSpeech is the speech chunk being accumulated; nil means none is active.
+	var currentSpeech *SpeechChunk
 
 	type possibleEnd struct {
 		pos int
@@ -116,12 +119,11 @@ func GetSpeechTimestamps(samples []float32, cfg VadConfig) []SpeechChunk {
 
 		if speechProb >= cfg.Threshold && !triggered {
 			triggered = true
-			currentSpeech = SpeechChunk{Start: curSample}
-			currentSpeechActive = true
+			currentSpeech = &SpeechChunk{Start: curSample}
 			continue
 		}
 
-		if triggered && currentSpeechActive && curSample-currentSpeech.Start > int(maxSpeechSamples) {
+		if triggered && currentSpeech != nil && curSample-currentSpeech.Start > int(maxSpeechSamples) {
 			if *cfg.UseMaxPossSilAtMaxSpeech && len(possibleEnds) > 0 {
 				best := possibleEnds[0]
 				for _, pe := range possibleEnds[1:] {
@@ -131,13 +133,12 @@ func GetSpeechTimestamps(samples []float32, cfg VadConfig) []SpeechChunk {
 				}
 				prevEnd = best.pos
 				currentSpeech.End = prevEnd
-				speeches = append(speeches, currentSpeech)
-				currentSpeechActive = false
+				speeches = append(speeches, *currentSpeech)
+				currentSpeech = nil
 				nextStart = prevEnd + best.dur
 
 				if nextStart < prevEnd+curSample {
-					currentSpeech = SpeechChunk{Start: nextStart}
-					currentSpeechActive = true
+					currentSpeech = &SpeechChunk{Start: nextStart}
 				} else {
 					triggered = false
 				}
@@ -148,13 +149,12 @@ func GetSpeechTimestamps(samples []float32, cfg VadConfig) []SpeechChunk {
 			} else {
 				if prevEnd != 0 {
 					currentSpeech.End = prevEnd
-					speeches = append(speeches, currentSpeech)
-					currentSpeechActive = false
+					speeches = append(speeches, *currentSpeech)
+					currentSpeech = nil
 					if nextStart < prevEnd {
 						triggered = false
 					} else {
-						currentSpeech = SpeechChunk{Start: nextStart}
-						currentSpeechActive = true
+						currentSpeech = &SpeechChunk{Start: nextStart}
 					}
 					prevEnd = 0
 					nextStart = 0
@@ -162,8 +162,8 @@ func GetSpeechTimestamps(samples []float32, cfg VadConfig) []SpeechChunk {
 					possibleEnds = nil
 				} else {
 					currentSpeech.End = curSample
-					speeches = append(speeches, currentSpeech)
-					currentSpeechActive = false
+					speeches = append(speeches, *currentSpeech)
+					currentSpeech = nil
 					prevEnd = 0
 					nextStart = 0
 					tempEnd = 0
@@ -190,9 +190,9 @@ func GetSpeechTimestamps(samples []float32, cfg VadConfig) []SpeechChunk {
 
 			currentSpeech.End = tempEnd
 			if float64(currentSpeech.End-currentSpeech.Start) > minSpeechSamples {
-				speeches = append(speeches, currentSpeech)
+				speeches = append(speeches, *currentSpeech)
 			}
-			currentSpeechActive = false
+			currentSpeech = nil
 			prevEnd = 0
 			nextStart = 0
 			tempEnd = 0
@@ -202,9 +202,9 @@ func GetSpeechTimestamps(samples []float32, cfg VadConfig) []SpeechChunk {
 		}
 	}
 
-	if currentSpeechActive && float64(audioLengthSamples-currentSpeech.Start) > minSpeechSamples {
+	if currentSpeech != nil && float64(audioLengthSamples-currentSpeech.Start) > minSpeechSamples {
 		currentSpeech.End = audioLengthSamples
-		speeches = append(speeches, currentSpeech)
+		speeches = append(speeches, *currentSpeech)
 	}
 
 	// Apply padding
@@ -226,18 +226,7 @@ func GetSpeechTimestamps(samples []float32, cfg VadConfig) []SpeechChunk {
 		}
 	}
 
-	return speeches
-}
-
-// getSpeechProbs runs the Silero VAD model on audio and returns per-frame speech
-// probabilities (one per 512-sample window). The whole signal is processed in a
-// single batched onnxruntime call, matching faster-whisper.
-func getSpeechProbs(samples []float32) []float32 {
-	probs, err := silerovad.Probs(samples)
-	if err != nil {
-		return nil
-	}
-	return probs
+	return speeches, nil
 }
 
 // chunkMetadata tracks the origin of a batched audio chunk for timestamp restoration.
@@ -274,25 +263,11 @@ func collectChunksBatched(samples []float32, chunks []SpeechChunk, maxDuration f
 			})
 			totalDuration += currentDuration
 
-			start := chunk.Start
-			end := chunk.End
-			if start > len(samples) {
-				start = len(samples)
-			}
-			if end > len(samples) {
-				end = len(samples)
-			}
+			start, end := clampRange(chunk.Start, chunk.End, len(samples))
 			currentAudio = append([]float32(nil), samples[start:end]...)
 			currentDuration = chunkLen
 		} else {
-			start := chunk.Start
-			end := chunk.End
-			if start > len(samples) {
-				start = len(samples)
-			}
-			if end > len(samples) {
-				end = len(samples)
-			}
+			start, end := clampRange(chunk.Start, chunk.End, len(samples))
 			currentAudio = append(currentAudio, samples[start:end]...)
 			currentDuration += chunkLen
 		}
@@ -321,14 +296,7 @@ func collectChunks(samples []float32, chunks []SpeechChunk) []float32 {
 
 	out := make([]float32, 0, totalLen)
 	for _, c := range chunks {
-		start := c.Start
-		end := c.End
-		if start > len(samples) {
-			start = len(samples)
-		}
-		if end > len(samples) {
-			end = len(samples)
-		}
+		start, end := clampRange(c.Start, c.End, len(samples))
 		out = append(out, samples[start:end]...)
 	}
 	return out
@@ -337,9 +305,9 @@ func collectChunks(samples []float32, chunks []SpeechChunk) []float32 {
 // speechTimestampsMap maps timestamps from VAD-compressed audio back to the
 // original audio timeline by tracking cumulative silence removed before each chunk.
 type speechTimestampsMap struct {
-	chunkEndSample      []int
-	totalSilenceBefore  []float64
-	samplingRate        float64
+	chunkEndSample     []int
+	totalSilenceBefore []float64
+	samplingRate       float64
 }
 
 func newSpeechTimestampsMap(chunks []SpeechChunk) *speechTimestampsMap {
@@ -363,7 +331,7 @@ func newSpeechTimestampsMap(chunks []SpeechChunk) *speechTimestampsMap {
 	return m
 }
 
-func (m *speechTimestampsMap) getChunkIndex(t float64) int {
+func (m *speechTimestampsMap) chunkIndex(t float64) int {
 	sample := int(t * m.samplingRate)
 	idx := sort.SearchInts(m.chunkEndSample, sample+1)
 	if idx >= len(m.chunkEndSample) {
@@ -372,11 +340,11 @@ func (m *speechTimestampsMap) getChunkIndex(t float64) int {
 	return idx
 }
 
-func (m *speechTimestampsMap) getOriginalTime(t float64, chunkIndex int) float64 {
-	if chunkIndex < 0 || chunkIndex >= len(m.totalSilenceBefore) {
+func (m *speechTimestampsMap) originalTime(t float64, idx int) float64 {
+	if idx < 0 || idx >= len(m.totalSilenceBefore) {
 		return t
 	}
-	return m.totalSilenceBefore[chunkIndex] + t
+	return m.totalSilenceBefore[idx] + t
 }
 
 // restoreSegmentTimestamps maps a segment's timestamps (and word timestamps)
@@ -385,18 +353,18 @@ func (m *speechTimestampsMap) restoreSegmentTimestamps(seg *Segment) {
 	startSec := seg.Start.Seconds()
 	endSec := seg.End.Seconds()
 
-	startIdx := m.getChunkIndex(startSec)
-	endIdx := m.getChunkIndex(endSec)
+	startIdx := m.chunkIndex(startSec)
+	endIdx := m.chunkIndex(endSec)
 
-	seg.Start = time.Duration(m.getOriginalTime(startSec, startIdx) * float64(time.Second))
-	seg.End = time.Duration(m.getOriginalTime(endSec, endIdx) * float64(time.Second))
+	seg.Start = time.Duration(m.originalTime(startSec, startIdx) * float64(time.Second))
+	seg.End = time.Duration(m.originalTime(endSec, endIdx) * float64(time.Second))
 
 	for i := range seg.Words {
 		wStart := seg.Words[i].Start.Seconds()
 		wEnd := seg.Words[i].End.Seconds()
 		middle := (wStart + wEnd) / 2
-		ci := m.getChunkIndex(middle)
-		seg.Words[i].Start = time.Duration(m.getOriginalTime(wStart, ci) * float64(time.Second))
-		seg.Words[i].End = time.Duration(m.getOriginalTime(wEnd, ci) * float64(time.Second))
+		ci := m.chunkIndex(middle)
+		seg.Words[i].Start = time.Duration(m.originalTime(wStart, ci) * float64(time.Second))
+		seg.Words[i].End = time.Duration(m.originalTime(wEnd, ci) * float64(time.Second))
 	}
 }

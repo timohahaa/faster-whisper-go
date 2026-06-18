@@ -64,20 +64,11 @@ func isSegmentAnomaly(seg Segment) bool {
 }
 
 func isAnomalyPunctuation(word string) bool {
-	word = strings.TrimSpace(word)
-	if word == "" {
-		return true
-	}
-	for _, r := range anomalyPunctuation {
-		if word == string(r) {
-			return true
-		}
-	}
-	return false
+	return strings.TrimSpace(word) == "" || containsRune(anomalyPunctuation, word)
 }
 
-// getLastWordEnd returns the end time (in seconds) of the last word across all segments.
-func getLastWordEnd(segments []Segment) float64 {
+// lastWordEnd returns the end time (in seconds) of the last word across all segments.
+func lastWordEnd(segments []Segment) float64 {
 	for i := len(segments) - 1; i >= 0; i-- {
 		if len(segments[i].Words) > 0 {
 			return segments[i].Words[len(segments[i].Words)-1].End.Seconds()

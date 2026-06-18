@@ -17,6 +17,13 @@ const (
 	batchedMinSilenceMs = 160
 )
 
+// chunkSegments holds the per-chunk decoding output during batched post-processing.
+type chunkSegments struct {
+	segments      []Segment
+	segmentTokens [][]int32
+	segmentSize   int
+}
+
 // TranscribeBatched runs speech recognition by splitting audio into independent
 // chunks via VAD and processing them in parallel batches through the encoder
 // and decoder. This gives higher throughput than the sequential Transcribe
@@ -62,14 +69,7 @@ func (m *Model) inferBatched(ctx context.Context, samples []float32, cfg Transcr
 		audioChunks = make([][]float32, len(cfg.ClipTimestamps))
 		chunksMetadata = make([]chunkMetadata, len(cfg.ClipTimestamps))
 		for i, clip := range cfg.ClipTimestamps {
-			start := clip.Start
-			end := clip.End
-			if start > len(samples) {
-				start = len(samples)
-			}
-			if end > len(samples) {
-				end = len(samples)
-			}
+			start, end := clampRange(clip.Start, clip.End, len(samples))
 			audioChunks[i] = samples[start:end]
 			clipDuration := float64(end-start) / whisperSampleRate
 			chunksMetadata[i] = chunkMetadata{
@@ -89,7 +89,11 @@ func (m *Model) inferBatched(ctx context.Context, samples []float32, cfg Transcr
 		}
 		vadCfg.applyDefaults()
 
-		speechChunks = GetSpeechTimestamps(samples, *vadCfg)
+		var err error
+		speechChunks, err = GetSpeechTimestamps(samples, *vadCfg)
+		if err != nil {
+			return nil, err
+		}
 
 		if len(speechChunks) == 0 {
 			durationSec := float64(len(samples)) / whisperSampleRate
@@ -165,15 +169,27 @@ func (m *Model) inferBatched(ctx context.Context, samples []float32, cfg Transcr
 		langProb = 1.0
 	}
 
-	suppressTokens := m.tokenizer.SuppressedTokens(cfg.SuppressTokens)
+	suppressTokens := m.tokenizer.suppressedTokens(cfg.SuppressTokens)
 
 	// Build the base prompt (same for all chunks in non-multilingual mode).
 	var previousTokens []int32
 	if cfg.InitialPrompt != "" {
-		previousTokens = m.tokenizer.Encode(" " + strings.TrimSpace(cfg.InitialPrompt))
+		previousTokens = m.tokenizer.encode(" " + strings.TrimSpace(cfg.InitialPrompt))
 	}
 
-	basePrompt := m.buildBatchedPrompt(lang, previousTokens, cfg, taskToken)
+	// Batched mode always decodes without timestamp tokens, matching
+	// faster-whisper's BatchedInferencePipeline (without_timestamps=True):
+	// coarse segment boundaries come from the VAD chunks and word-level timing
+	// from the separate alignment pass, so emitting timestamp tokens here only
+	// lengthens the decoded sequence and slows generation for no benefit.
+	// It also never conditions on previous-window text.
+	basePrompt := m.buildPrompt(promptParams{
+		lang:              lang,
+		previousTokens:    previousTokens,
+		taskToken:         taskToken,
+		hotwords:          cfg.Hotwords,
+		withoutTimestamps: true,
+	})
 
 	maxLength := maxTokenLength
 	if cfg.MaxNewTokens != nil {
@@ -232,7 +248,7 @@ func (m *Model) inferBatched(ctx context.Context, samples []float32, cfg Transcr
 		// In multilingual mode, detect language per chunk and patch the prompt.
 		if cfg.Multilingual && m.IsMultilingual() {
 			langTokenIdx := -1
-			langTok := m.tokenizer.LanguageToken(lang)
+			langTok := m.tokenizer.languageToken(lang)
 			for j, tok := range basePrompt {
 				if tok == langTok {
 					langTokenIdx = j
@@ -250,7 +266,7 @@ func (m *Model) inferBatched(ctx context.Context, samples []float32, cfg Transcr
 					if dlErr != nil {
 						continue
 					}
-					detectedLangTok := m.tokenizer.LanguageToken(dlResult.Language)
+					detectedLangTok := m.tokenizer.languageToken(dlResult.Language)
 					if detectedLangTok >= 0 {
 						prompts[i][langTokenIdx] = detectedLangTok
 					}
@@ -265,11 +281,6 @@ func (m *Model) inferBatched(ctx context.Context, samples []float32, cfg Transcr
 		}
 
 		// Post-process each item: split by timestamps, build segments.
-		type chunkSegments struct {
-			segments      []Segment
-			segmentTokens [][]int32
-			segmentSize   int
-		}
 		chunkResults := make([]chunkSegments, batchSize)
 
 		for i, genResult := range batchResult.Items {
@@ -282,11 +293,9 @@ func (m *Model) inferBatched(ctx context.Context, samples []float32, cfg Transcr
 				continue
 			}
 
-			var avgLogProb float32
-			cumLogProb := genResult.Score * float32(math.Pow(float64(seqLen), float64(*cfg.LengthPenalty)))
-			avgLogProb = cumLogProb / float32(seqLen+1)
+			avgLogProb := recoverAvgLogProb(genResult.Score, seqLen, *cfg.LengthPenalty)
 
-			split := m.tokenizer.SplitSegmentsByTimestamps(
+			split := m.tokenizer.splitSegmentsByTimestamps(
 				genResult.SequenceIDs,
 				meta.offset,
 				segmentSize,
@@ -298,7 +307,7 @@ func (m *Model) inferBatched(ctx context.Context, samples []float32, cfg Transcr
 			var segTokens [][]int32
 
 			for _, seg := range split.segments {
-				text := strings.TrimSpace(m.tokenizer.Decode(seg.tokens))
+				text := strings.TrimSpace(m.tokenizer.decode(seg.tokens))
 				if text == "" || seg.start == seg.end {
 					continue
 				}
@@ -311,7 +320,7 @@ func (m *Model) inferBatched(ctx context.Context, samples []float32, cfg Transcr
 					Text:             text,
 					Temperature:      cfg.Temperature[0],
 					AvgLogProb:       avgLogProb,
-					CompressionRatio: getCompressionRatio(text),
+					CompressionRatio: compressionRatio(text),
 					NoSpeechProb:     genResult.NoSpeechProb,
 				}
 				segments = append(segments, s)
@@ -365,16 +374,8 @@ func (m *Model) inferBatched(ctx context.Context, samples []float32, cfg Transcr
 		}
 	}
 
-	var textBuf strings.Builder
-	for i, seg := range allSegments {
-		if i > 0 {
-			textBuf.WriteByte(' ')
-		}
-		textBuf.WriteString(seg.Text)
-	}
-
 	return &Result{
-		Text:     textBuf.String(),
+		Text:     joinSegmentsText(allSegments),
 		Segments: allSegments,
 		Info: TranscriptionInfo{
 			Language:            lang,
@@ -389,51 +390,4 @@ func (m *Model) inferBatched(ctx context.Context, samples []float32, cfg Transcr
 // into English.
 func (m *Model) TranslateBatched(ctx context.Context, samples []float32, cfg TranscribeConfig) (*Result, error) {
 	return m.inferBatched(ctx, samples, cfg, m.tokenizer.translate)
-}
-
-// buildBatchedPrompt constructs the decoder prompt for batched mode.
-// Unlike the sequential buildPrompt, this never includes previous-window
-// context (condition_on_previous_text is always false in batched mode).
-func (m *Model) buildBatchedPrompt(lang string, previousTokens []int32, cfg TranscribeConfig, taskToken int32) []int32 {
-	var prompt []int32
-
-	if len(previousTokens) > 0 || (cfg.Hotwords != "") {
-		prompt = append(prompt, m.tokenizer.sotPrev)
-
-		if cfg.Hotwords != "" {
-			hw := m.tokenizer.Encode(" " + strings.TrimSpace(cfg.Hotwords))
-			maxHW := maxTokenLength / 2
-			if len(hw) >= maxHW {
-				hw = hw[:maxHW-1]
-			}
-			prompt = append(prompt, hw...)
-		}
-
-		if len(previousTokens) > 0 {
-			maxPrev := maxTokenLength/2 - 1
-			if len(previousTokens) > maxPrev {
-				previousTokens = previousTokens[len(previousTokens)-maxPrev:]
-			}
-			prompt = append(prompt, previousTokens...)
-		}
-	}
-
-	prompt = append(prompt, m.tokenizer.sot)
-
-	if m.IsMultilingual() && lang != "" {
-		langTok := m.tokenizer.LanguageToken(lang)
-		if langTok >= 0 {
-			prompt = append(prompt, langTok)
-		}
-		prompt = append(prompt, taskToken)
-	}
-
-	// Batched mode always decodes without timestamp tokens, matching
-	// faster-whisper's BatchedInferencePipeline (without_timestamps=True):
-	// coarse segment boundaries come from the VAD chunks and word-level timing
-	// from the separate alignment pass, so emitting timestamp tokens here only
-	// lengthens the decoded sequence and slows generation for no benefit.
-	prompt = append(prompt, m.tokenizer.noTimestamps)
-
-	return prompt
 }

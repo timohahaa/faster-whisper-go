@@ -4,12 +4,17 @@ import (
 	"math"
 	"testing"
 	"time"
+
+	"github.com/timohahaa/faster-whisper-go/internal/silerovad"
 )
 
 func TestGetSpeechTimestamps(t *testing.T) {
 	t.Run("AllSilence", func(t *testing.T) {
 		samples := make([]float32, 16000*5)
-		chunks := GetSpeechTimestamps(samples, VadConfig{})
+		chunks, err := GetSpeechTimestamps(samples, VadConfig{})
+		if err != nil {
+			t.Fatalf("GetSpeechTimestamps: %v", err)
+		}
 		if len(chunks) != 0 {
 			t.Errorf("expected 0 speech chunks for silence, got %d", len(chunks))
 		}
@@ -17,7 +22,10 @@ func TestGetSpeechTimestamps(t *testing.T) {
 
 	t.Run("AllSpeech", func(t *testing.T) {
 		samples := makeSineWave(1000, 16000, 2.0)
-		chunks := GetSpeechTimestamps(samples, VadConfig{})
+		chunks, err := GetSpeechTimestamps(samples, VadConfig{})
+		if err != nil {
+			t.Fatalf("GetSpeechTimestamps: %v", err)
+		}
 		if len(chunks) == 0 {
 			t.Skip("VAD did not detect sine wave as speech (model-dependent)")
 		}
@@ -39,9 +47,12 @@ func TestGetSpeechTimestamps(t *testing.T) {
 		samples = append(samples, silence...)
 		samples = append(samples, speech2...)
 
-		chunks := GetSpeechTimestamps(samples, VadConfig{
+		chunks, err := GetSpeechTimestamps(samples, VadConfig{
 			MinSilenceDurationMs: 500,
 		})
+		if err != nil {
+			t.Fatalf("GetSpeechTimestamps: %v", err)
+		}
 		if len(chunks) == 0 {
 			t.Skip("VAD did not detect sine waves as speech (model-dependent)")
 		}
@@ -98,14 +109,14 @@ func TestSpeechTimestampsMap(t *testing.T) {
 		}
 		m := newSpeechTimestampsMap(chunks)
 
-		idx := m.getChunkIndex(0.5)
-		original := m.getOriginalTime(0.5, idx)
+		idx := m.chunkIndex(0.5)
+		original := m.originalTime(0.5, idx)
 		if math.Abs(original-0.5) > 0.01 {
 			t.Errorf("expected ~0.5, got %f", original)
 		}
 
-		idx = m.getChunkIndex(1.5)
-		original = m.getOriginalTime(1.5, idx)
+		idx = m.chunkIndex(1.5)
+		original = m.originalTime(1.5, idx)
 		if math.Abs(original-2.5) > 0.01 {
 			t.Errorf("expected ~2.5, got %f", original)
 		}
@@ -184,7 +195,10 @@ func TestApplyVadDefaults(t *testing.T) {
 
 func TestGetSpeechProbs(t *testing.T) {
 	samples := make([]float32, 16000)
-	probs := getSpeechProbs(samples)
+	probs, err := silerovad.Probs(samples)
+	if err != nil {
+		t.Fatalf("silerovad.Probs: %v", err)
+	}
 	expectedFrames := (16000 + 511) / 512
 	if len(probs) != expectedFrames {
 		t.Errorf("expected %d frames, got %d", expectedFrames, len(probs))
@@ -201,8 +215,7 @@ func BenchmarkGetSpeechProbs(b *testing.B) {
 		samples := makeSineWave(440, whisperSampleRate, 5.0)
 		b.ResetTimer()
 		for b.Loop() {
-			getSpeechProbs(samples)
+			_, _ = silerovad.Probs(samples)
 		}
 	})
 }
-

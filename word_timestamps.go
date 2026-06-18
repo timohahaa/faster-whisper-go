@@ -288,7 +288,7 @@ func (t *tokenizer) filterTextTokens(tokens []int32) []int32 {
 func (m *Model) buildAlignStartSequence(lang string, taskToken int32) []int32 {
 	seq := []int32{m.tokenizer.sot}
 	if m.IsMultilingual() && lang != "" {
-		langTok := m.tokenizer.LanguageToken(lang)
+		langTok := m.tokenizer.languageToken(lang)
 		if langTok >= 0 {
 			seq = append(seq, langTok)
 		}
@@ -337,19 +337,6 @@ func mergePunctuationsOnAlignment(alignment []alignmentWord, prependChars, appen
 		}
 		j++
 	}
-}
-
-func containsRune(chars, s string) bool {
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return false
-	}
-	for _, r := range chars {
-		if s == string(r) {
-			return true
-		}
-	}
-	return false
 }
 
 func isSentenceEndMark(word string) bool {
