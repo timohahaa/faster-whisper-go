@@ -40,17 +40,17 @@ GPU 1). Timing excludes file reading and a warmup pass.
 
 | File | Audio | Python | Go | Python x | Go x | go/py |
 |------|------:|-------:|---:|---------:|-----:|------:|
-| `test.wav` | 82.0 s | 2.31 s | 2.25 s | 35.4x | 36.4x | 0.97x |
-| `anthropic_workshop_en.wav` | 4539.7 s | 111.45 s | 109.34 s | 40.7x | 41.5x | 0.98x |
-| `postgres_interview_ru.wav` | 7259.5 s | 204.00 s | 199.96 s | 35.6x | 36.3x | 0.98x |
+| `test.wav` | 82.0 s | 2.29 s | 2.28 s | 35.8x | 35.9x | 1.00x |
+| `anthropic_workshop_en.wav` | 4539.7 s | 112.02 s | 109.53 s | 40.5x | 41.5x | 0.98x |
+| `postgres_interview_ru.wav` | 7259.5 s | 204.01 s | 199.75 s | 35.6x | 36.3x | 0.98x |
 
 #### Sequential
 
 | File | Audio | Python | Go | Python x | Go x | go/py |
 |------|------:|-------:|---:|---------:|-----:|------:|
-| `test.wav` | 82.0 s | 3.54 s | 3.66 s | 23.2x | 22.4x | 1.04x |
-| `anthropic_workshop_en.wav` | 4539.7 s | 420.94 s | 521.52 s | 10.8x | 8.7x | 1.24x |
-| `postgres_interview_ru.wav` | 7259.5 s | 703.93 s | 745.55 s | 10.3x | 9.7x | 1.06x |
+| `test.wav` | 82.0 s | 3.52 s | 3.63 s | 23.3x | 22.6x | 1.03x |
+| `anthropic_workshop_en.wav` | 4539.7 s | 470.67 s | 523.93 s | 9.7x | 8.7x | 1.11x |
+| `postgres_interview_ru.wav` | 7259.5 s | 774.53 s | 715.60 s | 9.4x | 10.1x | 0.92x |
 
 ### Accuracy (Go vs Python reference)
 
@@ -67,8 +67,8 @@ GPU 1). Timing excludes file reading and a warmup pass.
 | File | WER | CER | lang py/go | seg py/go |
 |------|----:|----:|:----------:|:---------:|
 | `test.wav` | 1.27% | 0.96% | en/en | 7/7 |
-| `anthropic_workshop_en.wav` | 7.51% | 5.70% | en/en | 1553/1480 |
-| `postgres_interview_ru.wav` | 6.71% | 4.48% | ru/ru | 3006/3374 |
+| `anthropic_workshop_en.wav` | 8.31% | 6.55% | en/en | 1479/1268 |
+| `postgres_interview_ru.wav` | 10.67% | 7.46% | ru/ru | 4832/2820 |
 
 ### Takeaways
 
@@ -76,9 +76,10 @@ GPU 1). Timing excludes file reading and a warmup pass.
   consistently slightly faster) and stays nearly identical on output (WER ≤ 2%,
   identical segment counts and detected languages).
 - **Sequential**: output is close on short audio; on long audio the transcripts
-  diverge more (WER ~7%), driven mainly by different segment boundaries
-  (e.g. 1553 vs 1480 segments). Go is competitive on the shorter/Russian files
-  and ~24% slower on the long English file.
+  diverge substantially (WER ~8–11%), driven mainly by different segment
+  boundaries (e.g. 4832 vs 2820 segments on the Russian file). Speed is mixed —
+  Go is ~11% slower on the long English file but ~8% faster on the long Russian
+  file and within ~3% on the short file.
 - Batched is the faster pipeline overall (~36–42x realtime vs ~9–23x for
   sequential) and the recommended path for throughput.
 
