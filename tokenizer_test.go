@@ -6,6 +6,20 @@ import (
 	"testing"
 )
 
+// Large-v2 special token IDs, used only to build the fake test vocabulary.
+// Production code resolves these dynamically from tokenizer.json.
+const (
+	testEOT          int32 = 50257
+	testSOT          int32 = 50258
+	testTranslate    int32 = 50358
+	testTranscribe   int32 = 50359
+	testSOTlm        int32 = 50360
+	testSOTprev      int32 = 50361
+	testNoSpeech     int32 = 50362
+	testNoTimestamps int32 = 50363
+	testTimestampBeg int32 = 50364
+)
+
 func makeTestTokenizer() *tokenizer {
 	tok := &tokenizer{
 		idToToken:   make(map[int32]string),
@@ -13,8 +27,7 @@ func makeTestTokenizer() *tokenizer {
 		langToToken: make(map[string]int32),
 		mergeRank:   make(map[string]int),
 	}
-	buildByteDecoderInto(tok)
-	tok.byteEncoder = buildByteEncoder(tok)
+	buildByteMaps(tok)
 
 	toBPE := func(raw string) string { return tok.textToBPEString(raw) }
 
@@ -60,37 +73,39 @@ func makeTestTokenizer() *tokenizer {
 		addMergesForWord(w.raw)
 	}
 
-	addToken(tokenEOT, "<|endoftext|>")
-	addToken(tokenSOT, "<|startoftranscript|>")
-	addToken(tokenTimestampBeg, "<|0.00|>")
-	addToken(tokenTimestampBeg+1, "<|0.02|>")
-	addToken(tokenTimestampBeg+50, "<|1.00|>")
-	addToken(tokenTimestampBeg+150, "<|3.00|>")
+	addToken(testEOT, "<|endoftext|>")
+	addToken(testSOT, "<|startoftranscript|>")
+	addToken(testTimestampBeg, "<|0.00|>")
+	addToken(testTimestampBeg+1, "<|0.02|>")
+	addToken(testTimestampBeg+50, "<|1.00|>")
+	addToken(testTimestampBeg+150, "<|3.00|>")
 
 	addToken(50259, "<|en|>")
 	addToken(50260, "<|ru|>")
 	tok.langToToken["en"] = 50259
 	tok.langToToken["ru"] = 50260
 
-	addToken(tokenTranscribe, "<|transcribe|>")
-	addToken(tokenTranslate, "<|translate|>")
-	addToken(tokenSOTprev, "<|startofprev|>")
-	addToken(tokenSOTlm, "<|startoflm|>")
-	addToken(tokenNoSpeech, "<|nospeech|>")
-	addToken(tokenNoTimestamps, "<|notimestamps|>")
+	addToken(testTranscribe, "<|transcribe|>")
+	addToken(testTranslate, "<|translate|>")
+	addToken(testSOTprev, "<|startofprev|>")
+	addToken(testSOTlm, "<|startoflm|>")
+	addToken(testNoSpeech, "<|nospeech|>")
+	addToken(testNoTimestamps, "<|notimestamps|>")
 
-	tok.initSpecialTokens()
+	if err := tok.initSpecialTokens(); err != nil {
+		panic(err)
+	}
 
 	return tok
 }
 
 func buildByteDecoder() map[rune]byte {
 	t := &tokenizer{}
-	buildByteDecoderInto(t)
+	buildByteMaps(t)
 	result := make(map[rune]byte, 256)
 	for i, b := range t.byteDecoder {
-		if b != 0 || i == 0 {
-			result[rune(i)] = b
+		if b >= 0 {
+			result[rune(i)] = byte(b)
 		}
 	}
 	return result
@@ -176,7 +191,7 @@ func TestDecode(t *testing.T) {
 		t.Errorf("Decode([0,1]) = %q, want %q", got, "Hello world")
 	}
 
-	got = tok.Decode([]int32{0, tokenEOT, 1})
+	got = tok.Decode([]int32{0, tok.eot, 1})
 	if got != "Hello world" {
 		t.Errorf("Decode with special = %q, want %q", got, "Hello world")
 	}
@@ -196,11 +211,11 @@ func TestSplitSegmentsByTimestamps(t *testing.T) {
 	tok := makeTestTokenizer()
 
 	t.Run("ConsecutiveWithEOT", func(t *testing.T) {
-		ts0 := tokenTimestampBeg         // 0.00
-		ts50 := tokenTimestampBeg + 50   // 1.00
-		ts150 := tokenTimestampBeg + 150 // 3.00
+		ts0 := tok.timestampBegin         // 0.00
+		ts50 := tok.timestampBegin + 50   // 1.00
+		ts150 := tok.timestampBegin + 150 // 3.00
 
-		tokens := []int32{ts0, 0, 1, ts50, ts50, 2, 3, ts150, tokenEOT}
+		tokens := []int32{ts0, 0, 1, ts50, ts50, 2, 3, ts150, tok.eot}
 		result := tok.SplitSegmentsByTimestamps(tokens, 0.0, 3000, 30.0, 0)
 
 		if len(result.segments) != 1 {
@@ -214,9 +229,9 @@ func TestSplitSegmentsByTimestamps(t *testing.T) {
 	})
 
 	t.Run("ConsecutiveWithSingleEnding", func(t *testing.T) {
-		ts0 := tokenTimestampBeg         // 0.00
-		ts50 := tokenTimestampBeg + 50   // 1.00
-		ts150 := tokenTimestampBeg + 150 // 3.00
+		ts0 := tok.timestampBegin         // 0.00
+		ts50 := tok.timestampBegin + 50   // 1.00
+		ts150 := tok.timestampBegin + 150 // 3.00
 
 		tokens := []int32{ts0, 0, 1, ts50, ts50, 2, 3, ts150}
 		result := tok.SplitSegmentsByTimestamps(tokens, 0.0, 3000, 30.0, 0)
@@ -241,7 +256,7 @@ func TestSplitSegmentsByTimestamps(t *testing.T) {
 	})
 
 	t.Run("SingleTimestampEndingNoConsecutive", func(t *testing.T) {
-		ts50 := tokenTimestampBeg + 50
+		ts50 := tok.timestampBegin + 50
 
 		tokens := []int32{0, 1, ts50}
 		result := tok.SplitSegmentsByTimestamps(tokens, 0.0, 3000, 30.0, 0)
@@ -270,8 +285,8 @@ func TestSplitSegmentsByTimestamps(t *testing.T) {
 	})
 
 	t.Run("WithTimeOffset", func(t *testing.T) {
-		ts0 := tokenTimestampBeg
-		ts50 := tokenTimestampBeg + 50
+		ts0 := tok.timestampBegin
+		ts50 := tok.timestampBegin + 50
 
 		tokens := []int32{ts0, 0, ts50}
 		result := tok.SplitSegmentsByTimestamps(tokens, 10.0, 3000, 30.0, 1000)
@@ -303,7 +318,7 @@ func TestSuppressedTokens(t *testing.T) {
 			return false
 		}
 
-		for _, special := range []int32{tokenTranscribe, tokenTranslate, tokenSOT, tokenSOTprev, tokenSOTlm, tokenNoSpeech} {
+		for _, special := range []int32{tok.transcribe, tok.translate, tok.sot, tok.sotPrev, tok.sotLm, tok.noSpeech} {
 			if !hasSpecial(special) {
 				t.Errorf("expected special token %d to be suppressed", special)
 			}
@@ -340,17 +355,19 @@ func TestSuppressedTokens(t *testing.T) {
 }
 
 func TestFilterTextTokens(t *testing.T) {
+	tok := makeTestTokenizer()
+
 	t.Run("AllText", func(t *testing.T) {
 		tokens := []int32{0, 1, 2, 3}
-		got := filterTextTokens(tokens)
+		got := tok.filterTextTokens(tokens)
 		if !reflect.DeepEqual(got, tokens) {
 			t.Errorf("all text tokens: got %v, want %v", got, tokens)
 		}
 	})
 
 	t.Run("WithSpecial", func(t *testing.T) {
-		tokens := []int32{100, 200, tokenEOT, 300, tokenTimestampBeg + 50}
-		got := filterTextTokens(tokens)
+		tokens := []int32{100, 200, tok.eot, 300, tok.timestampBegin + 50}
+		got := tok.filterTextTokens(tokens)
 		want := []int32{100, 200, 300}
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("with special: got %v, want %v", got, want)
@@ -358,15 +375,15 @@ func TestFilterTextTokens(t *testing.T) {
 	})
 
 	t.Run("AllSpecial", func(t *testing.T) {
-		tokens := []int32{tokenEOT, tokenTimestampBeg, tokenTimestampBeg + 10}
-		got := filterTextTokens(tokens)
+		tokens := []int32{tok.eot, tok.timestampBegin, tok.timestampBegin + 10}
+		got := tok.filterTextTokens(tokens)
 		if len(got) != 0 {
 			t.Errorf("all special: got %v, want empty", got)
 		}
 	})
 
 	t.Run("Empty", func(t *testing.T) {
-		got := filterTextTokens(nil)
+		got := tok.filterTextTokens(nil)
 		if got != nil {
 			t.Errorf("nil input: got %v, want nil", got)
 		}

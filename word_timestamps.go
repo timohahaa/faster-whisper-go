@@ -54,7 +54,7 @@ func (m *Model) findAlignment(
 
 	tokensWithEOT := make([]int32, len(textTokens)+1)
 	copy(tokensWithEOT, textTokens)
-	tokensWithEOT[len(textTokens)] = tokenEOT
+	tokensWithEOT[len(textTokens)] = m.tokenizer.eot
 
 	words, wordTokens := m.tokenizer.splitToWordTokens(tokensWithEOT, lang)
 	if len(wordTokens) <= 1 {
@@ -151,7 +151,7 @@ func (m *Model) addWordTimestamps(
 	// Collect all text tokens across subsegments for a single alignment call.
 	var allTextTokens []int32
 	for _, toks := range segmentTokens {
-		filtered := filterTextTokens(toks)
+		filtered := m.tokenizer.filterTextTokens(toks)
 		allTextTokens = append(allTextTokens, filtered...)
 	}
 
@@ -196,7 +196,7 @@ func (m *Model) addWordTimestamps(
 	wordIndex := 0
 
 	for si := range segments {
-		nSegTokens := len(filterTextTokens(segmentTokens[si]))
+		nSegTokens := len(m.tokenizer.filterTextTokens(segmentTokens[si]))
 		savedTokens := 0
 		var words []Word
 
@@ -257,11 +257,11 @@ func (m *Model) addWordTimestamps(
 }
 
 // filterTextTokens returns only non-special, non-timestamp tokens.
-func filterTextTokens(tokens []int32) []int32 {
+func (t *tokenizer) filterTextTokens(tokens []int32) []int32 {
 	// Fast path: if all tokens are text tokens, return the input slice directly.
 	allText := true
 	for _, id := range tokens {
-		if id >= tokenEOT {
+		if id >= t.eot {
 			allText = false
 			break
 		}
@@ -272,7 +272,7 @@ func filterTextTokens(tokens []int32) []int32 {
 
 	out := make([]int32, 0, len(tokens))
 	for _, id := range tokens {
-		if id < tokenEOT {
+		if id < t.eot {
 			out = append(out, id)
 		}
 	}
@@ -282,7 +282,7 @@ func filterTextTokens(tokens []int32) []int32 {
 // buildAlignStartSequence constructs the start sequence for alignment:
 // [SOT, lang_token, task_token]
 func (m *Model) buildAlignStartSequence(lang string, taskToken int32) []int32 {
-	seq := []int32{tokenSOT}
+	seq := []int32{m.tokenizer.sot}
 	if m.IsMultilingual() && lang != "" {
 		langTok := m.tokenizer.LanguageToken(lang)
 		if langTok >= 0 {

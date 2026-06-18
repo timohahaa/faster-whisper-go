@@ -116,6 +116,9 @@ type TranscribeConfig struct {
 	// ChunkLength overrides the default 30s max chunk duration for batched mode.
 	// Only used by TranscribeBatched. 0 uses the default (30).
 	ChunkLength int
+	// MelWorkers is the number of parallel goroutines used to compute mel
+	// features. Only used by TranscribeBatched. 0 uses the default (4).
+	MelWorkers int
 	// ClipTimestamps optionally provides pre-computed speech regions.
 	// Only used by TranscribeBatched. When set, VAD is skipped.
 	ClipTimestamps []SpeechChunk

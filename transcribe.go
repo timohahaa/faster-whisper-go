@@ -412,7 +412,7 @@ func (m *Model) buildPrompt(lang string, previousTokens []int32, cfg TranscribeC
 		}
 	}
 
-	prompt = append(prompt, tokenSOT)
+	prompt = append(prompt, m.tokenizer.sot)
 
 	if m.IsMultilingual() && lang != "" {
 		langTok := m.tokenizer.LanguageToken(lang)

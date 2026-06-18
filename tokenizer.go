@@ -3,12 +3,12 @@ package whisper
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
+	"slices"
 	"strings"
-	"unicode/utf8"
 )
 
 // gpt2PreTokenizer is the GPT-2 pre-tokenization regex that splits text into
@@ -19,29 +19,6 @@ import (
 // optional-space + digits, optional-space + punctuation/symbols, whitespace runs.
 var gpt2PreTokenizer = regexp.MustCompile(`'s|'t|'re|'ve|'m|'ll|'d| ?\pL+| ?\pN+| ?[^\s\pL\pN]+|\s+`)
 
-// Well-known Whisper special token IDs. tokenEOT and tokenSOT sit immediately
-// after the 50257-entry base vocabulary and are the same for every Whisper
-// model. The remaining special tokens come after the language-token block,
-// whose size differs between models (99 languages for large-v2, 100 for
-// large-v3/turbo), so their concrete IDs are resolved per-model from the
-// tokenizer in initSpecialTokens. The constants below are the large-v2 layout
-// and serve only as a fallback when a model is missing the named tokens.
-const (
-	tokenEOT          int32 = 50257
-	tokenSOT          int32 = 50258
-	tokenSOTprev      int32 = 50361
-	tokenNoSpeech     int32 = 50362
-	tokenNoTimestamps int32 = 50363
-	tokenTimestampBeg int32 = 50364
-)
-
-// Task tokens (large-v2 fallback layout, see note above).
-const (
-	tokenTranslate  int32 = 50358
-	tokenTranscribe int32 = 50359
-	tokenSOTlm      int32 = 50360
-)
-
 const maxTokenLength = 448
 
 // tokenizer decodes/encodes Whisper token IDs.
@@ -50,12 +27,16 @@ type tokenizer struct {
 	tokenToID       map[string]int32
 	langToToken     map[string]int32
 	mergeRank       map[string]int
-	byteDecoder     [512]byte
-	byteEncoder     map[byte]rune
+	byteEncoder     [256]rune  // byte -> printable rune
+	byteDecoder     [512]int16 // printable rune -> byte, -1 if unmapped
 	nonSpeechTokens []int32
 
-	// Per-model special token IDs, resolved by initSpecialTokens. These vary
-	// with the language-block size (e.g. large-v3 shifts them by +1 vs v2).
+	// Per-model special token IDs, all resolved from the loaded vocabulary by
+	// initSpecialTokens. Concrete IDs vary with the language-block size (e.g.
+	// large-v3 shifts the post-language tokens by +1 vs v2), so they are read
+	// from the model rather than hardcoded.
+	eot            int32
+	sot            int32
 	transcribe     int32
 	translate      int32
 	sotLm          int32
@@ -65,26 +46,37 @@ type tokenizer struct {
 	timestampBegin int32
 }
 
-// initSpecialTokens resolves model-specific special token IDs from the loaded
-// vocabulary, falling back to the large-v2 constants when a token is absent.
-// This keeps timestamp parsing and prompt construction correct across model
-// variants whose language-token block differs in size.
-func (t *tokenizer) initSpecialTokens() {
-	resolve := func(fallback int32, contents ...string) int32 {
+// initSpecialTokens resolves every special token ID from the loaded vocabulary
+// (mirroring the Python tokenizer's token_to_id lookups). Concrete IDs vary
+// across model variants whose language-token block differs in size, so nothing
+// is hardcoded. Returns an error listing any tokens the model is missing.
+func (t *tokenizer) initSpecialTokens() error {
+	var missing []string
+	resolve := func(contents ...string) int32 {
 		for _, c := range contents {
 			if id, ok := t.tokenToID[c]; ok {
 				return id
 			}
 		}
-		return fallback
+		missing = append(missing, contents[0])
+		return 0
 	}
-	t.transcribe = resolve(tokenTranscribe, "<|transcribe|>")
-	t.translate = resolve(tokenTranslate, "<|translate|>")
-	t.sotLm = resolve(tokenSOTlm, "<|startoflm|>")
-	t.sotPrev = resolve(tokenSOTprev, "<|startofprev|>")
-	t.noSpeech = resolve(tokenNoSpeech, "<|nospeech|>", "<|nocaptions|>")
-	t.noTimestamps = resolve(tokenNoTimestamps, "<|notimestamps|>")
-	t.timestampBegin = resolve(tokenTimestampBeg, "<|0.00|>")
+	t.eot = resolve("<|endoftext|>")
+	t.sot = resolve("<|startoftranscript|>")
+	t.transcribe = resolve("<|transcribe|>")
+	t.translate = resolve("<|translate|>")
+	t.sotLm = resolve("<|startoflm|>")
+	t.sotPrev = resolve("<|startofprev|>")
+	t.noSpeech = resolve("<|nospeech|>", "<|nocaptions|>")
+	t.noTimestamps = resolve("<|notimestamps|>")
+	if len(missing) > 0 {
+		return fmt.Errorf("tokenizer.json missing special tokens: %s", strings.Join(missing, ", "))
+	}
+	// Timestamp tokens are not named entries in the vocabulary; the first one
+	// (<|0.00|>) immediately follows <|notimestamps|> (matches the Python
+	// tokenizer's timestamp_begin = no_timestamps + 1).
+	t.timestampBegin = t.noTimestamps + 1
+	return nil
 }
 
 // loadTokenizer parses tokenizer.json from a model directory.
@@ -114,8 +106,7 @@ func loadTokenizer(modelDir string) (*tokenizer, error) {
 		tokenToID:   make(map[string]int32, len(raw.Model.Vocab)+len(raw.AddedTokens)),
 		langToToken: make(map[string]int32),
 	}
-	buildByteDecoderInto(t)
-	t.byteEncoder = buildByteEncoder(t)
+	buildByteMaps(t)
 
 	for token, id := range raw.Model.Vocab {
 		t.idToToken[id] = token
@@ -137,7 +128,9 @@ func loadTokenizer(modelDir string) (*tokenizer, error) {
 		}
 	}
 
-	t.initSpecialTokens()
+	if err := t.initSpecialTokens(); err != nil {
+		return nil, err
+	}
 
 	return t, nil
 }
@@ -147,7 +140,7 @@ func (t *tokenizer) Decode(ids []int32) string {
 	var buf strings.Builder
 	buf.Grow(len(ids) * 4)
 	for _, id := range ids {
-		if id >= tokenEOT {
+		if id >= t.eot {
 			continue
 		}
 		tok, ok := t.idToToken[id]
@@ -169,7 +162,7 @@ func (t *tokenizer) decodeWithTimestamps(ids []int32) string {
 			fmt.Fprintf(&buf, "<|%.2f|>", ts)
 			continue
 		}
-		if id >= tokenEOT {
+		if id >= t.eot {
 			continue
 		}
 		tok, ok := t.idToToken[id]
@@ -201,6 +194,7 @@ func (t *tokenizer) splitToWordTokens(tokens []int32, lang string) ([]string, []
 // Each token that decodes without replacement chars forms its own word.
 func (t *tokenizer) splitTokensOnUnicode(tokens []int32) ([]string, [][]int32) {
 	decodedFull := t.decodeWithTimestamps(tokens)
+	fullRunes := []rune(decodedFull)
 	const replacementChar = '\ufffd'
 
 	var words []string
@@ -222,7 +216,6 @@ func (t *tokenizer) splitTokensOnUnicode(tokens []int32) ([]string, [][]int32) {
 
 		skip := false
 		if replacementCharIndex >= 0 {
-			fullRunes := []rune(decodedFull)
 			if replacementCharIndex < len(fullRunes) && fullRunes[replacementCharIndex] != replacementChar {
 				skip = true
 			}
@@ -249,7 +242,7 @@ func (t *tokenizer) splitTokensOnSpaces(tokens []int32) ([]string, [][]int32) {
 
 	for i, subword := range subwords {
 		subToks := subwordTokensList[i]
-		isSpecial := len(subToks) > 0 && subToks[0] >= tokenEOT
+		isSpecial := len(subToks) > 0 && subToks[0] >= t.eot
 		withSpace := strings.HasPrefix(subword, " ")
 		isPunct := len(strings.TrimSpace(subword)) == 1 && isPunctuationChar(strings.TrimSpace(subword))
 
@@ -295,12 +288,7 @@ func (t *tokenizer) textToBPEString(text string) string {
 	var buf strings.Builder
 	buf.Grow(len(text))
 	for i := 0; i < len(text); i++ {
-		r, ok := t.byteEncoder[text[i]]
-		if ok {
-			buf.WriteRune(r)
-		} else {
-			buf.WriteByte(text[i])
-		}
+		buf.WriteRune(t.byteEncoder[text[i]])
 	}
 	return buf.String()
 }
@@ -413,11 +401,7 @@ func (t *tokenizer) NonSpeechTokens() []int32 {
 		}
 	}
 
-	result := make([]int32, 0, len(resultSet))
-	for id := range resultSet {
-		result = append(result, id)
-	}
-	sort.Slice(result, func(i, j int) bool { return result[i] < result[j] })
+	result := slices.Sorted(maps.Keys(resultSet))
 	t.nonSpeechTokens = result
 	return result
 }
@@ -444,20 +428,14 @@ func (t *tokenizer) SuppressedTokens(suppress []int32) []int32 {
 
 	for _, tok := range []int32{
 		t.transcribe, t.translate,
-		tokenSOT, t.sotPrev, t.sotLm,
+		t.sot, t.sotPrev, t.sotLm,
 		t.noSpeech,
 	} {
 		set[tok] = true
 	}
 
-	result := make([]int32, 0, len(set))
-	for id := range set {
-		result = append(result, id)
-	}
-	sort.Slice(result, func(i, j int) bool { return result[i] < result[j] })
-	return result
+	return slices.Sorted(maps.Keys(set))
 }
-
 
 // LanguageToken returns the token ID for a language code, or -1 if not found.
 func (t *tokenizer) LanguageToken(lang string) int32 {
@@ -466,7 +444,6 @@ func (t *tokenizer) LanguageToken(lang string) int32 {
 	}
 	return -1
 }
-
 
 func isLangToken(s string) bool {
 	if len(s) < 6 || len(s) > 7 {
@@ -487,61 +464,39 @@ func isLangToken(s string) bool {
 // decodeTokenInto writes the decoded bytes of a GPT-2 BPE token directly into the provided Builder.
 func (t *tokenizer) decodeTokenInto(buf *strings.Builder, token string) {
 	for _, r := range token {
-		if int(r) < len(t.byteDecoder) {
-			b := t.byteDecoder[r]
-			if b != 0 || r == 0 {
-				buf.WriteByte(b)
-				continue
-			}
+		if int(r) < len(t.byteDecoder) && t.byteDecoder[r] >= 0 {
+			buf.WriteByte(byte(t.byteDecoder[r]))
+		} else {
+			buf.WriteRune(r)
 		}
-		var tmp [utf8.UTFMax]byte
-		n := utf8.EncodeRune(tmp[:], r)
-		buf.Write(tmp[:n])
 	}
 }
 
-// buildByteEncoder creates the forward mapping byte -> rune for BPE encoding.
-func buildByteEncoder(t *tokenizer) map[byte]rune {
-	enc := make(map[byte]rune, 256)
-	for i := range 512 {
-		b := t.byteDecoder[i]
-		if b != 0 || i == 0 {
-			enc[b] = rune(i)
-		}
-	}
-	return enc
-}
-
-// buildByteDecoderInto populates the tokenizer's byte decoder fields.
+// buildByteMaps populates the tokenizer's byte<->rune tables in a single pass.
 //
 // GPT-2 BPE represents every byte (0-255) as a printable Unicode character so
-// the vocabulary never contains invisible control chars or whitespace.
+// the vocabulary never contains invisible control chars or whitespace. The 188
+// "safe" bytes (printable ASCII '!'-'~', Latin-1 Supplement '¡'-'¬' and
+// '®'-'ÿ') map to the same codepoint (identity); the remaining 68 bytes (space,
+// tab, newline, DEL, other control chars) are assigned to codepoints starting
+// at U+0100 (Ā, ā, Ă, …), in increasing byte order.
 //
-// The 188 "safe" bytes (printable ASCII '!'-'~', Latin-1 Supplement '¡'-'¬'
-// and '®'-'ÿ') map to the same Unicode codepoint (identity). The remaining
-// 68 bytes (space, tab, newline, DEL, other control chars) are assigned to
-// codepoints starting at U+0100 (Ā, ā, Ă, …).
-func buildByteDecoderInto(t *tokenizer) {
-	var isSafe [256]bool
-
-	for i := int('!'); i <= int('~'); i++ {
-		isSafe[i] = true
-		t.byteDecoder[i] = byte(i)
+// byteEncoder maps byte -> rune; byteDecoder maps rune -> byte (-1 = unmapped).
+func buildByteMaps(t *tokenizer) {
+	for i := range t.byteDecoder {
+		t.byteDecoder[i] = -1
 	}
-	for i := int('¡'); i <= int('¬'); i++ {
-		isSafe[i] = true
-		t.byteDecoder[i] = byte(i)
-	}
-	for i := int('®'); i <= int('ÿ'); i++ {
-		isSafe[i] = true
-		t.byteDecoder[i] = byte(i)
-	}
-
 	n := 0
-	for i := range 256 {
-		if !isSafe[i] {
-			t.byteDecoder[256+n] = byte(i)
+	for b := 0; b < 256; b++ {
+		var r rune
+		switch {
+		case b >= '!' && b <= '~', b >= '\u00a1' && b <= '\u00ac', b >= '\u00ae' && b <= '\u00ff':
+			r = rune(b)
+		default:
+			r = rune(256 + n)
 			n++
 		}
+		t.byteEncoder[b] = r
+		t.byteDecoder[r] = int16(b)
 	}
 }

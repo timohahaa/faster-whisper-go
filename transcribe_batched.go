@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"math"
 	"os"
-	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -35,6 +34,9 @@ func (m *Model) TranscribeBatched(ctx context.Context, samples []float32, cfg Tr
 	}
 	if cfg.ChunkLength == 0 {
 		cfg.ChunkLength = whisperChunkLen
+	}
+	if cfg.MelWorkers == 0 {
+		cfg.MelWorkers = 4
 	}
 
 	prof := os.Getenv("WHISPER_PROFILE") != ""
@@ -105,7 +107,7 @@ func (m *Model) TranscribeBatched(ctx context.Context, samples []float32, cfg Tr
 	// the (pure-Go, CPU-bound) STFT + mel filterbank work across all cores.
 	melStart := time.Now()
 	melChunks := make([][]float32, len(audioChunks))
-	melWorkers := runtime.GOMAXPROCS(0)
+	melWorkers := cfg.MelWorkers
 	if melWorkers > len(audioChunks) {
 		melWorkers = len(audioChunks)
 	}
@@ -403,9 +405,9 @@ func (m *Model) TranscribeBatched(ctx context.Context, samples []float32, cfg Tr
 // into English.
 func (m *Model) TranslateBatched(ctx context.Context, samples []float32, cfg TranscribeConfig) (*Result, error) {
 	// Translation uses the same pipeline; the task token is embedded in the
-	// prompt by buildBatchedPrompt when taskToken=tokenTranslate. For now,
-	// expose only Transcribe; translate support can be added by parameterizing
-	// the task token if needed.
+	// prompt by buildBatchedPrompt when the task token is the translate token.
+	// For now, expose only Transcribe; translate support can be added by
+	// parameterizing the task token if needed.
 	return m.TranscribeBatched(ctx, samples, cfg)
 }
 
@@ -436,7 +438,7 @@ func (m *Model) buildBatchedPrompt(lang string, previousTokens []int32, cfg Tran
 		}
 	}
 
-	prompt = append(prompt, tokenSOT)
+	prompt = append(prompt, m.tokenizer.sot)
 
 	if m.IsMultilingual() && lang != "" {
 		langTok := m.tokenizer.LanguageToken(lang)
