@@ -119,6 +119,37 @@ det, err := model.DetectLanguage(ctx, samples)
 fmt.Println(det.Language, det.Probability) // "en" 0.98
 ```
 
+### Voice Activity Detection
+
+Each `Model` owns its own Silero VAD instance (a dedicated onnxruntime session
+plus LSTM scratch state), created on `Load` and released on `Close` — a strict
+1:1 relationship between a model and its VAD. This keeps VAD concurrency tied to
+model concurrency: run one model per GPU/worker and its VAD is used by that
+worker's transcription calls.
+
+Detect speech regions directly with the model's VAD:
+
+```go
+chunks, err := model.SpeechTimestamps(samples, whisper.VadConfig{})
+for _, c := range chunks {
+    // c.Start / c.End are sample indices at 16kHz
+}
+```
+
+For standalone use (without a model), create a VAD from the public `silerovad`
+package. A `*silerovad.VAD` is safe for concurrent use — calls are serialized by
+an internal mutex, so share one instance per model rather than per goroutine:
+
+```go
+vad, err := silerovad.New()
+defer vad.Close()
+
+chunks, err := whisper.GetSpeechTimestamps(vad, samples, whisper.VadConfig{})
+```
+
+The process-wide onnxruntime environment is initialized once on the first
+`silerovad.New` / `whisper.Load` and stays alive for the lifetime of the process.
+
 ### Key config fields
 
 `TranscribeConfig` fields are optional — zero values get sensible defaults.
@@ -179,15 +210,29 @@ Large benchmark files are excluded from repo.
 - **VAD:** Silero, `vad_filter=true`
 - **Decode:** beam_size=5, best_of=5, temperature fallback, word timestamps
 
-### Speed (batched)
+### Speed
 
-| File                      | Audio | Python | Go    | go/py |
-|---------------------------|------:|-------:|------:|------:|
-| test.wav                  |   82s |  2.29s | 2.28s | 1.00x |
-| anthropic_workshop_en.wav | 4540s |   112s |  110s | 0.98x |
-| postgres_interview_ru.wav | 7260s |   204s |  200s | 0.98x |
+`go/py` = Go time / Python time (< 1.00 means Go is faster).
 
-### Accuracy (batched, Go vs Python reference)
+#### Batched
+
+| File                      | Audio  | Python  | Go      | go/py |
+|---------------------------|-------:|--------:|--------:|------:|
+| test.wav                  |    82s |   2.31s |   2.25s | 0.97x |
+| anthropic_workshop_en.wav | 4540s  | 111.45s | 109.34s | 0.98x |
+| postgres_interview_ru.wav | 7260s  | 204.00s | 199.96s | 0.98x |
+
+#### Sequential
+
+| File                      | Audio  | Python  | Go      | go/py |
+|---------------------------|-------:|--------:|--------:|------:|
+| test.wav                  |    82s |   3.54s |   3.66s | 1.04x |
+| anthropic_workshop_en.wav | 4540s  | 420.94s | 521.52s | 1.24x |
+| postgres_interview_ru.wav | 7260s  | 703.93s | 745.55s | 1.06x |
+
+### Accuracy (Go vs Python reference)
+
+#### Batched
 
 | File                      |   WER |   CER |
 |---------------------------|------:|------:|
@@ -195,4 +240,15 @@ Large benchmark files are excluded from repo.
 | anthropic_workshop_en.wav | 0.49% | 0.35% |
 | postgres_interview_ru.wav | 1.04% | 0.60% |
 
-Batched mode matches Python on speed (within 2-3%) and output quality (WER <= 2%, identical segment counts). Sequential mode diverges more on long audio due to randomness in temperature fallback and slightly different FFT implementations.
+#### Sequential
+
+| File                      |   WER |   CER |
+|---------------------------|------:|------:|
+| test.wav                  | 1.27% | 0.96% |
+| anthropic_workshop_en.wav | 7.51% | 5.70% |
+| postgres_interview_ru.wav | 6.71% | 4.48% |
+
+### Takeaways
+
+- **Batched:** Go matches Python on speed (within 2-3%, slightly faster) and output quality (WER <= 2%, identical segment counts).
+- **Sequential:** close on short audio; on long audio transcripts diverge more (WER ~7%) due to different segment boundaries and different FFT implementations.

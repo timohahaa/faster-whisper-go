@@ -5,13 +5,26 @@ import (
 	"testing"
 	"time"
 
-	"github.com/timohahaa/faster-whisper-go/internal/silerovad"
+	"github.com/timohahaa/faster-whisper-go/silerovad"
 )
 
+// newTestVAD builds a VAD instance for tests and registers cleanup.
+func newTestVAD(t *testing.T) *silerovad.VAD {
+	t.Helper()
+	v, err := silerovad.New()
+	if err != nil {
+		t.Fatalf("silerovad.New: %v", err)
+	}
+	t.Cleanup(func() { v.Close() })
+	return v
+}
+
 func TestGetSpeechTimestamps(t *testing.T) {
+	vad := newTestVAD(t)
+
 	t.Run("AllSilence", func(t *testing.T) {
 		samples := make([]float32, 16000*5)
-		chunks, err := GetSpeechTimestamps(samples, VadConfig{})
+		chunks, err := GetSpeechTimestamps(vad, samples, VadConfig{})
 		if err != nil {
 			t.Fatalf("GetSpeechTimestamps: %v", err)
 		}
@@ -22,7 +35,7 @@ func TestGetSpeechTimestamps(t *testing.T) {
 
 	t.Run("AllSpeech", func(t *testing.T) {
 		samples := makeSineWave(1000, 16000, 2.0)
-		chunks, err := GetSpeechTimestamps(samples, VadConfig{})
+		chunks, err := GetSpeechTimestamps(vad, samples, VadConfig{})
 		if err != nil {
 			t.Fatalf("GetSpeechTimestamps: %v", err)
 		}
@@ -47,7 +60,7 @@ func TestGetSpeechTimestamps(t *testing.T) {
 		samples = append(samples, silence...)
 		samples = append(samples, speech2...)
 
-		chunks, err := GetSpeechTimestamps(samples, VadConfig{
+		chunks, err := GetSpeechTimestamps(vad, samples, VadConfig{
 			MinSilenceDurationMs: 500,
 		})
 		if err != nil {
@@ -194,10 +207,11 @@ func TestApplyVadDefaults(t *testing.T) {
 }
 
 func TestGetSpeechProbs(t *testing.T) {
+	vad := newTestVAD(t)
 	samples := make([]float32, 16000)
-	probs, err := silerovad.Probs(samples)
+	probs, err := vad.Probs(samples)
 	if err != nil {
-		t.Fatalf("silerovad.Probs: %v", err)
+		t.Fatalf("vad.Probs: %v", err)
 	}
 	expectedFrames := (16000 + 511) / 512
 	if len(probs) != expectedFrames {
@@ -211,11 +225,17 @@ func TestGetSpeechProbs(t *testing.T) {
 }
 
 func BenchmarkGetSpeechProbs(b *testing.B) {
+	vad, err := silerovad.New()
+	if err != nil {
+		b.Fatalf("silerovad.New: %v", err)
+	}
+	defer vad.Close()
+
 	b.Run("5s", func(b *testing.B) {
 		samples := makeSineWave(440, whisperSampleRate, 5.0)
 		b.ResetTimer()
 		for b.Loop() {
-			_, _ = silerovad.Probs(samples)
+			_, _ = vad.Probs(samples)
 		}
 	})
 }

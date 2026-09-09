@@ -1,11 +1,12 @@
 package whisper
 
 import (
+	"fmt"
 	"math"
 	"sort"
 	"time"
 
-	"github.com/timohahaa/faster-whisper-go/internal/silerovad"
+	"github.com/timohahaa/faster-whisper-go/silerovad"
 )
 
 // VadConfig controls Voice Activity Detection parameters.
@@ -63,11 +64,23 @@ type SpeechChunk struct {
 	End   int // last sample (exclusive)
 }
 
+// SpeechTimestamps detects speech regions in 16kHz mono float32 audio using
+// this model's own VAD instance. See GetSpeechTimestamps for details.
+func (m *Model) SpeechTimestamps(samples []float32, cfg VadConfig) ([]SpeechChunk, error) {
+	if m == nil || m.vad == nil {
+		return nil, fmt.Errorf("whisper: model has no VAD instance")
+	}
+	return GetSpeechTimestamps(m.vad, samples, cfg)
+}
+
 // GetSpeechTimestamps detects speech regions in 16kHz mono float32 audio.
 // Returns a slice of SpeechChunk with start/end in sample indices.
 // It applies the Silero VAD probabilities with hysteresis thresholding,
 // min/max duration limits and silence padding.
-func GetSpeechTimestamps(samples []float32, cfg VadConfig) ([]SpeechChunk, error) {
+//
+// vad is the VAD instance used to compute per-window speech probabilities; it
+// must not be nil. Concurrent calls sharing one VAD are serialized internally.
+func GetSpeechTimestamps(vad *silerovad.VAD, samples []float32, cfg VadConfig) ([]SpeechChunk, error) {
 	cfg.applyDefaults()
 
 	samplingRate := float64(whisperSampleRate)
@@ -80,7 +93,7 @@ func GetSpeechTimestamps(samples []float32, cfg VadConfig) ([]SpeechChunk, error
 
 	audioLengthSamples := len(samples)
 
-	probs, err := silerovad.Probs(samples)
+	probs, err := vad.Probs(samples)
 	if err != nil {
 		return nil, err
 	}

@@ -4,11 +4,13 @@ import (
 	"fmt"
 
 	"github.com/timohahaa/faster-whisper-go/internal/ct2bridge"
+	"github.com/timohahaa/faster-whisper-go/silerovad"
 )
 
 // Model is a loaded Whisper model ready for transcription.
 type Model struct {
 	bridge         *ct2bridge.Model
+	vad            *silerovad.VAD
 	tokenizer      *tokenizer
 	nMels          int
 	sparseFilters  []melFilterSpan
@@ -61,8 +63,15 @@ func Load(modelSizeOrPath string, cfg ModelConfig) (*Model, error) {
 	dense := computeMelFilterbank(nMels, whisperNFFT, whisperSampleRate)
 	sparse := buildSparseFilters(dense, nMels, whisperFreqBins)
 
+	vad, err := silerovad.New()
+	if err != nil {
+		bridge.Close()
+		return nil, fmt.Errorf("init silero vad: %w", err)
+	}
+
 	return &Model{
 		bridge:         bridge,
+		vad:            vad,
 		tokenizer:      tok,
 		nMels:          nMels,
 		sparseFilters:  sparse,
@@ -78,6 +87,10 @@ func (m *Model) Close() {
 	if m.bridge != nil {
 		m.bridge.Close()
 		m.bridge = nil
+	}
+	if m.vad != nil {
+		m.vad.Close()
+		m.vad = nil
 	}
 }
 

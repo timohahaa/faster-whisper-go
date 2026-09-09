@@ -43,7 +43,7 @@ func (m *Model) infer(ctx context.Context, samples []float32, cfg TranscribeConf
 			vadCfg = &VadConfig{}
 		}
 		var err error
-		speechChunks, err = GetSpeechTimestamps(samples, *vadCfg)
+		speechChunks, err = GetSpeechTimestamps(m.vad, samples, *vadCfg)
 		if err != nil {
 			return nil, err
 		}
