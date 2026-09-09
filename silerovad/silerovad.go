@@ -225,6 +225,52 @@ func (v *VAD) Probs(samples []float32) ([]float32, error) {
 	return probs, nil
 }
 
+// runStep runs a single VAD window forward, carrying LSTM state across calls.
+// input must have length contextSamples+windowSamples (the previous window's
+// trailing context followed by the current window). On return, hOut/cOut are
+// copied back into hIn/cIn so the next call continues the same sequence.
+//
+// The state tensors are owned by the caller (one set per stream); the session
+// is shared, so calls are serialized by v.mu. This is the streaming counterpart
+// to Probs, which resets state and batches whole buffers offline.
+func (v *VAD) runStep(input []float32, hIn, cIn, hOut, cOut *ort.Tensor[float32]) (float32, error) {
+	if v == nil || v.session == nil {
+		return 0, fmt.Errorf("silerovad: VAD is closed")
+	}
+	rowLen := contextSamples + windowSamples
+	if len(input) != rowLen {
+		return 0, fmt.Errorf("silerovad: runStep expects %d samples, got %d", rowLen, len(input))
+	}
+
+	v.mu.Lock()
+	defer v.mu.Unlock()
+
+	inTensor, err := ort.NewTensor(ort.NewShape(1, int64(rowLen)), input)
+	if err != nil {
+		return 0, fmt.Errorf("create input tensor: %w", err)
+	}
+	defer inTensor.Destroy()
+
+	outTensor, err := ort.NewEmptyTensor[float32](ort.NewShape(1))
+	if err != nil {
+		return 0, fmt.Errorf("create output tensor: %w", err)
+	}
+	defer outTensor.Destroy()
+
+	if err := v.session.Run(
+		[]ort.Value{inTensor, hIn, cIn},
+		[]ort.Value{outTensor, hOut, cOut},
+	); err != nil {
+		return 0, fmt.Errorf("run silero vad: %w", err)
+	}
+
+	// Carry LSTM state to the next step.
+	copy(hIn.GetData(), hOut.GetData())
+	copy(cIn.GetData(), cOut.GetData())
+
+	return outTensor.GetData()[0], nil
+}
+
 func (v *VAD) Close() error {
 	if v == nil {
 		return nil

@@ -150,6 +150,36 @@ chunks, err := whisper.GetSpeechTimestamps(vad, samples, whisper.VadConfig{})
 The process-wide onnxruntime environment is initialized once on the first
 `silerovad.New` / `whisper.Load` and stays alive for the lifetime of the process.
 
+#### Streaming (real-time endpointing)
+
+For live audio, use a `silerovad.Stream`: it detects speech start/end on the fly
+(hysteresis + min speech/silence durations + prefix padding) and emits the
+speech segment on `EndOfSpeech`, ready to feed a transcriber. One shared `VAD`
+(session) backs many `Stream`s — create one `Stream` per source (e.g. per audio
+track). A `Stream` is single-goroutine; different `Stream`s may run concurrently.
+
+```go
+vad, _ := silerovad.New()
+defer vad.Close()
+
+stream, _ := vad.NewStream(silerovad.StreamConfig{})
+defer stream.Close()
+
+// Feed 16kHz mono float32 chunks (resample upstream). On EndOfSpeech, transcribe
+// the segment with the model's own VAD disabled — it's already segmented:
+for chunk := range audio16k {
+    events, _ := stream.Push(chunk)
+    for _, e := range events {
+        if e.Type == silerovad.EventEndOfSpeech {
+            res, _ := model.Transcribe(ctx, e.Samples, whisper.TranscribeConfig{VadFilter: false})
+            _ = res
+        }
+    }
+}
+events, _ := stream.Flush() // force EndOfSpeech when the source ends
+_ = events
+```
+
 ### Key config fields
 
 `TranscribeConfig` fields are optional — zero values get sensible defaults.
