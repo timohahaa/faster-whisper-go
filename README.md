@@ -248,17 +248,17 @@ Large benchmark files are excluded from repo.
 
 | File                      | Audio  | Python  | Go      | go/py |
 |---------------------------|-------:|--------:|--------:|------:|
-| test.wav                  |    82s |   2.31s |   2.25s | 0.97x |
-| anthropic_workshop_en.wav | 4540s  | 111.45s | 109.34s | 0.98x |
-| postgres_interview_ru.wav | 7260s  | 204.00s | 199.96s | 0.98x |
+| test.wav                  |    82s |   2.24s |   2.24s | 1.00x |
+| anthropic_workshop_en.wav | 4540s  | 108.65s | 107.91s | 0.99x |
+| postgres_interview_ru.wav | 7260s  | 198.19s | 200.68s | 1.01x |
 
 #### Sequential
 
 | File                      | Audio  | Python  | Go      | go/py |
 |---------------------------|-------:|--------:|--------:|------:|
-| test.wav                  |    82s |   3.54s |   3.66s | 1.04x |
-| anthropic_workshop_en.wav | 4540s  | 420.94s | 521.52s | 1.24x |
-| postgres_interview_ru.wav | 7260s  | 703.93s | 745.55s | 1.06x |
+| test.wav                  |    82s |   3.50s |   3.94s | 1.12x |
+| anthropic_workshop_en.wav | 4540s  | 415.04s | 508.58s | 1.23x |
+| postgres_interview_ru.wav | 7260s  | 646.18s | 796.85s | 1.23x |
 
 ### Accuracy (Go vs Python reference)
 
@@ -266,19 +266,19 @@ Large benchmark files are excluded from repo.
 
 | File                      |   WER |   CER |
 |---------------------------|------:|------:|
-| test.wav                  | 1.97% | 2.33% |
+| test.wav                  | 0.00% | 0.00% |
 | anthropic_workshop_en.wav | 0.49% | 0.35% |
 | postgres_interview_ru.wav | 1.04% | 0.60% |
 
 #### Sequential
 
-| File                      |   WER |   CER |
-|---------------------------|------:|------:|
-| test.wav                  | 1.27% | 0.96% |
-| anthropic_workshop_en.wav | 7.51% | 5.70% |
-| postgres_interview_ru.wav | 6.71% | 4.48% |
+| File                      |    WER |    CER |
+|---------------------------|-------:|-------:|
+| test.wav                  |  1.27% |  0.96% |
+| anthropic_workshop_en.wav |  8.89% |  6.86% |
+| postgres_interview_ru.wav | 18.07% | 13.24% |
 
 ### Takeaways
 
-- **Batched:** Go matches Python on speed (within 2-3%, slightly faster) and output quality (WER <= 2%, identical segment counts).
-- **Sequential:** close on short audio; on long audio transcripts diverge more (WER ~7%) due to different segment boundaries and different FFT implementations.
+- **Batched:** Go matches Python on speed (within ~1%) and output quality (WER <= ~1%, identical segment counts).
+- **Sequential:** close on short audio; on long audio Go is ~20-25% slower and transcripts diverge more (WER up to ~18%) due to different segment boundaries and different FFT implementations.
