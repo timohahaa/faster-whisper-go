@@ -108,9 +108,43 @@ ct2_batch_generate_result ct2_generate_batch(
 
 void ct2_batch_generate_result_free(ct2_batch_generate_result* r);
 
-ct2_encoder_output* ct2_encoder_output_slice(
-    ct2_encoder_output* batch_enc, size_t index,
-    char** error_out);
+typedef struct {
+    size_t batch_size;
+    size_t* num_tokens;         /* [batch_size] tokens per item */
+    float** text_token_probs;   /* [batch_size][num_tokens[b]] per-token probability */
+    size_t* num_alignments;     /* [batch_size] alignment pairs per item */
+    int32_t** text_indices;     /* [batch_size][num_alignments[b]] text index from DTW */
+    int32_t** time_indices;     /* [batch_size][num_alignments[b]] time index from DTW */
+    char* error;
+} ct2_batch_align_result;
+
+/* ct2_align_batch runs cross-attention alignment over a whole batched encoder
+ * output in a single native call. Per-item text_tokens may be empty (count 0):
+ * the matching result entry is returned with zero tokens/alignments. */
+ct2_batch_align_result ct2_align_batch(
+    ct2_model* m,
+    ct2_encoder_output* encoder_output,
+    const int32_t* start_sequence, size_t start_sequence_count,
+    const int32_t** text_tokens, const size_t* text_tokens_counts,
+    const size_t* num_frames, size_t batch_size,
+    int median_filter_width);
+
+void ct2_batch_align_result_free(ct2_batch_align_result* r);
+
+typedef struct {
+    size_t batch_size;
+    char** languages;       /* [batch_size] top language per item */
+    float* probabilities;   /* [batch_size] */
+    char* error;
+} ct2_batch_detect_result;
+
+/* ct2_detect_language_batch detects the most likely language for every item of
+ * a batched encoder output in a single call. */
+ct2_batch_detect_result ct2_detect_language_batch(
+    ct2_model* m,
+    ct2_encoder_output* encoder_output);
+
+void ct2_batch_detect_result_free(ct2_batch_detect_result* r);
 
 #ifdef __cplusplus
 }

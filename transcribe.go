@@ -60,8 +60,8 @@ func (m *Model) infer(ctx context.Context, samples []float32, cfg TranscribeConf
 	}
 
 	mel, totalFrames := computeMelSpectrogram(samples, m.nMels, m.sparseFilters)
-	// faster-whisper drops the trailing feature frame when bounding the seek
-	// loop: content_frames = features.shape[-1] - 1.
+	// Drop the trailing feature frame when bounding the seek loop:
+	// contentFrames = totalFrames - 1.
 	contentFrames := totalFrames - 1
 	if contentFrames < 0 {
 		contentFrames = 0

@@ -256,19 +256,12 @@ func (m *Model) inferBatched(ctx context.Context, samples []float32, cfg Transcr
 				}
 			}
 			if langTokenIdx >= 0 {
-				for i := range batchSize {
-					slicedEnc, sliceErr := enc.Slice(i)
-					if sliceErr != nil {
-						continue
-					}
-					dlResult, dlErr := m.bridge.DetectLanguage(slicedEnc)
-					slicedEnc.Free()
-					if dlErr != nil {
-						continue
-					}
-					detectedLangTok := m.tokenizer.languageToken(dlResult.Language)
-					if detectedLangTok >= 0 {
-						prompts[i][langTokenIdx] = detectedLangTok
+				if det, dlErr := m.bridge.DetectLanguageBatch(enc); dlErr == nil {
+					for i := 0; i < batchSize && i < len(det.Items); i++ {
+						detectedLangTok := m.tokenizer.languageToken(det.Items[i].Language)
+						if detectedLangTok >= 0 {
+							prompts[i][langTokenIdx] = detectedLangTok
+						}
 					}
 				}
 			}
@@ -334,28 +327,42 @@ func (m *Model) inferBatched(ctx context.Context, samples []float32, cfg Transcr
 			}
 		}
 
-		// Word timestamps: process per-chunk using sliced encoder output.
 		if cfg.WordTimestamps && !cfg.DisableTimestamps {
+			textTokensList := make([][]int32, batchSize)
+			numFramesList := make([]int, batchSize)
 			for i := range batchSize {
 				cr := &chunkResults[i]
-				if len(cr.segments) == 0 {
-					continue
+				var allTextTokens []int32
+				for _, toks := range cr.segmentTokens {
+					allTextTokens = append(allTextTokens, m.tokenizer.filterTextTokens(toks)...)
 				}
+				textTokensList[i] = allTextTokens
+				numFramesList[i] = cr.segmentSize
+			}
 
-				slicedEnc, sliceErr := enc.Slice(i)
-				if sliceErr != nil {
-					continue
+			startSeq := m.buildAlignStartSequence(lang, taskToken)
+			batchAlign, alignErr := m.bridge.AlignBatch(
+				enc, startSeq, textTokensList, numFramesList, defaultMedianFilterWidth,
+			)
+			if alignErr == nil {
+				for i := range batchSize {
+					cr := &chunkResults[i]
+					if len(cr.segments) == 0 || len(textTokensList[i]) == 0 {
+						continue
+					}
+					alignment := m.alignmentWordsFromResult(
+						batchAlign.Items[i], textTokensList[i], lang,
+					)
+					if len(alignment) == 0 {
+						continue
+					}
+					seekVal := int(batchMeta[i].offset * framesPerSecond)
+					cr.segments, lastSpeechTimestamp = m.distributeWordTimestamps(
+						cr.segments, cr.segmentTokens, alignment, seekVal,
+						cfg.PrependPunctuations, cfg.AppendPunctuations,
+						lastSpeechTimestamp,
+					)
 				}
-
-				seekVal := int(batchMeta[i].offset * framesPerSecond)
-				cr.segments, lastSpeechTimestamp = m.addWordTimestamps(
-					slicedEnc, cr.segments, cr.segmentTokens,
-					lang, taskToken, cr.segmentSize, seekVal,
-					cfg.PrependPunctuations, cfg.AppendPunctuations,
-					lastSpeechTimestamp,
-				)
-
-				slicedEnc.Free()
 			}
 		}
 

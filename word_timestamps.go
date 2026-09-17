@@ -47,9 +47,20 @@ func (m *Model) findAlignment(
 	if err != nil {
 		return nil, err
 	}
+	return m.alignmentWordsFromResult(alignment, textTokens, lang), nil
+}
 
+// alignmentWordsFromResult converts a raw CTranslate2 align result into per-word
+// alignment data (timing + probability). Shared by the sequential and batched
+// pipelines: the sequential path gets each AlignResult from a per-window align
+// call, the batched path from a single batched align call over the whole batch.
+func (m *Model) alignmentWordsFromResult(
+	alignment ct2bridge.AlignResult,
+	textTokens []int32,
+	lang string,
+) []alignmentWord {
 	if alignment.NumTokens == 0 || len(alignment.TextIndices) == 0 {
-		return nil, nil
+		return nil
 	}
 
 	textIndices := alignment.TextIndices
@@ -62,7 +73,7 @@ func (m *Model) findAlignment(
 
 	words, wordTokens := m.tokenizer.splitToWordTokens(tokensWithEOT, lang)
 	if len(wordTokens) <= 1 {
-		return nil, nil
+		return nil
 	}
 
 	wordBoundaries := make([]int, len(wordTokens))
@@ -128,7 +139,7 @@ func (m *Model) findAlignment(
 		})
 	}
 
-	return result, nil
+	return result
 }
 
 // addWordTimestamps computes word-level timestamps for segments, applies
@@ -164,6 +175,25 @@ func (m *Model) addWordTimestamps(
 		return segments, lastSpeechTimestamp
 	}
 
+	return m.distributeWordTimestamps(
+		segments, segmentTokens, alignment, seek,
+		prependPunct, appendPunct, lastSpeechTimestamp,
+	)
+}
+
+// distributeWordTimestamps maps aligned words onto segments, applying the
+// duration-truncation hacks, punctuation merging and segment-boundary
+// adjustments. It modifies segments in place (setting Words and adjusting
+// Start/End) and returns the updated lastSpeechTimestamp. Shared by the
+// sequential and batched pipelines once per-word alignment is available.
+func (m *Model) distributeWordTimestamps(
+	segments []Segment,
+	segmentTokens [][]int32,
+	alignment []alignmentWord,
+	seek int,
+	prependPunct, appendPunct string,
+	lastSpeechTimestamp float64,
+) ([]Segment, float64) {
 	// Compute median and max duration for truncation hacks.
 	var durations []float64
 	for _, w := range alignment {

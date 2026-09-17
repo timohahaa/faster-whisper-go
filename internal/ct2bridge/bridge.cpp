@@ -111,6 +111,18 @@ ct2_batch_generate_result make_batch_generate_error(const char* message) {
     return result;
 }
 
+ct2_batch_align_result make_batch_align_error(const char* message) {
+    ct2_batch_align_result result{};
+    result.error = copy_string(message);
+    return result;
+}
+
+ct2_batch_detect_result make_batch_detect_error(const char* message) {
+    ct2_batch_detect_result result{};
+    result.error = copy_string(message);
+    return result;
+}
+
 void set_error_out(char** error_out, const char* message) {
     if (error_out != nullptr) {
         *error_out = copy_string(message);
@@ -617,52 +629,213 @@ void ct2_batch_generate_result_free(ct2_batch_generate_result* r) {
     *r = ct2_batch_generate_result{};
 }
 
-ct2_encoder_output* ct2_encoder_output_slice(
-    ct2_encoder_output* batch_enc, size_t index,
-    char** error_out) {
-    if (batch_enc == nullptr) {
-        set_error_out(error_out, "encoder output is null");
-        return nullptr;
+ct2_batch_align_result ct2_align_batch(
+    ct2_model* m,
+    ct2_encoder_output* encoder_output,
+    const int32_t* start_sequence, size_t start_sequence_count,
+    const int32_t** text_tokens, const size_t* text_tokens_counts,
+    const size_t* num_frames, size_t batch_size,
+    int median_filter_width) {
+    if (m == nullptr || m->whisper == nullptr) {
+        return make_batch_align_error("model is null");
+    }
+    if (encoder_output == nullptr) {
+        return make_batch_align_error("encoder output is required");
+    }
+    if (batch_size == 0) {
+        return make_batch_align_error("batch_size must be > 0");
     }
 
     try {
-        const auto& shape = batch_enc->view.shape();
-        if (shape.size() < 1 || index >= static_cast<size_t>(shape[0])) {
-            set_error_out(error_out, "index out of range");
-            return nullptr;
+        std::vector<size_t> start_seq(start_sequence_count);
+        for (size_t i = 0; i < start_sequence_count; ++i) {
+            start_seq[i] = static_cast<size_t>(start_sequence[i]);
         }
 
-        ctranslate2::dim_t seq_len = shape.size() >= 2 ? shape[1] : 1;
-        ctranslate2::dim_t feat_dim = shape.size() >= 3 ? shape[2] : 1;
-        ctranslate2::dim_t stride = seq_len * feat_dim;
-        ctranslate2::dim_t offset = static_cast<ctranslate2::dim_t>(index) * stride;
-
-        // The batched encoder output keeps the model's native dtype/device
-        // (e.g. float16 on CUDA when compute_type=int8). Copy the requested
-        // item preserving both, instead of assuming a host float32 buffer.
-        const auto& src = batch_enc->view;
-        ctranslate2::StorageView sliced(
-            {1, seq_len, feat_dim}, src.dtype(), src.device());
-        switch (src.dtype()) {
-            case ctranslate2::DataType::FLOAT32:
-                sliced.copy_from(src.data<float>() + offset, stride, src.device());
-                break;
-            case ctranslate2::DataType::FLOAT16:
-                sliced.copy_from(
-                    src.data<ctranslate2::float16_t>() + offset, stride, src.device());
-                break;
-            default:
-                set_error_out(error_out,
-                    "unsupported encoder output dtype for slice");
-                return nullptr;
+        // Per-item token sequences. Empty sequences are allowed and produce an
+        // empty alignment for that item (chunks without decoded segments).
+        std::vector<std::vector<size_t>> token_batches(batch_size);
+        for (size_t b = 0; b < batch_size; ++b) {
+            size_t count = text_tokens_counts[b];
+            token_batches[b].resize(count);
+            for (size_t i = 0; i < count; ++i) {
+                token_batches[b][i] = static_cast<size_t>(text_tokens[b][i]);
+            }
         }
 
-        auto out = new ct2_encoder_output{std::move(sliced)};
+        std::vector<size_t> num_frames_vec(batch_size);
+        for (size_t b = 0; b < batch_size; ++b) {
+            num_frames_vec[b] = num_frames[b];
+        }
+
+        int filter_width = median_filter_width > 0 ? median_filter_width : 7;
+
+        auto futures = m->whisper->align(
+            encoder_output->view,
+            start_seq,
+            token_batches,
+            num_frames_vec,
+            static_cast<ctranslate2::dim_t>(filter_width));
+
+        if (futures.size() != batch_size) {
+            return make_batch_align_error(
+                "align returned unexpected number of results");
+        }
+
+        ct2_batch_align_result out{};
+        out.batch_size = batch_size;
+        out.num_tokens = static_cast<size_t*>(
+            std::calloc(batch_size, sizeof(size_t)));
+        out.text_token_probs = static_cast<float**>(
+            std::calloc(batch_size, sizeof(float*)));
+        out.num_alignments = static_cast<size_t*>(
+            std::calloc(batch_size, sizeof(size_t)));
+        out.text_indices = static_cast<int32_t**>(
+            std::calloc(batch_size, sizeof(int32_t*)));
+        out.time_indices = static_cast<int32_t**>(
+            std::calloc(batch_size, sizeof(int32_t*)));
+
+        if (!out.num_tokens || !out.text_token_probs || !out.num_alignments ||
+            !out.text_indices || !out.time_indices) {
+            ct2_batch_align_result_free(&out);
+            return make_batch_align_error("failed to allocate batch align result");
+        }
+
+        for (size_t b = 0; b < batch_size; ++b) {
+            auto result = futures[b].get();
+            if (result.alignments.empty()) {
+                continue;  // leave zeros for this item
+            }
+
+            size_t n_tokens = result.text_token_probs.size();
+            out.num_tokens[b] = n_tokens;
+            if (n_tokens > 0) {
+                out.text_token_probs[b] = static_cast<float*>(
+                    std::malloc(n_tokens * sizeof(float)));
+                if (out.text_token_probs[b] == nullptr) {
+                    ct2_batch_align_result_free(&out);
+                    return make_batch_align_error(
+                        "failed to allocate text_token_probs");
+                }
+                for (size_t i = 0; i < n_tokens; ++i) {
+                    out.text_token_probs[b][i] = result.text_token_probs[i];
+                }
+            }
+
+            size_t n_align = result.alignments.size();
+            out.num_alignments[b] = n_align;
+            out.text_indices[b] = static_cast<int32_t*>(
+                std::malloc(n_align * sizeof(int32_t)));
+            out.time_indices[b] = static_cast<int32_t*>(
+                std::malloc(n_align * sizeof(int32_t)));
+            if (out.text_indices[b] == nullptr || out.time_indices[b] == nullptr) {
+                ct2_batch_align_result_free(&out);
+                return make_batch_align_error(
+                    "failed to allocate alignment indices");
+            }
+            for (size_t i = 0; i < n_align; ++i) {
+                out.text_indices[b][i] =
+                    static_cast<int32_t>(result.alignments[i].first);
+                out.time_indices[b][i] =
+                    static_cast<int32_t>(result.alignments[i].second);
+            }
+        }
+
         return out;
     } catch (const std::exception& e) {
-        set_error_out(error_out, e.what());
-        return nullptr;
+        return make_batch_align_error(e.what());
     }
+}
+
+void ct2_batch_align_result_free(ct2_batch_align_result* r) {
+    if (r == nullptr) {
+        return;
+    }
+    if (r->text_token_probs != nullptr) {
+        for (size_t i = 0; i < r->batch_size; ++i) {
+            std::free(r->text_token_probs[i]);
+        }
+        std::free(r->text_token_probs);
+    }
+    if (r->text_indices != nullptr) {
+        for (size_t i = 0; i < r->batch_size; ++i) {
+            std::free(r->text_indices[i]);
+        }
+        std::free(r->text_indices);
+    }
+    if (r->time_indices != nullptr) {
+        for (size_t i = 0; i < r->batch_size; ++i) {
+            std::free(r->time_indices[i]);
+        }
+        std::free(r->time_indices);
+    }
+    std::free(r->num_tokens);
+    std::free(r->num_alignments);
+    std::free(r->error);
+    *r = ct2_batch_align_result{};
+}
+
+ct2_batch_detect_result ct2_detect_language_batch(
+    ct2_model* m,
+    ct2_encoder_output* encoder_output) {
+    if (m == nullptr || m->whisper == nullptr) {
+        return make_batch_detect_error("model is null");
+    }
+    if (encoder_output == nullptr) {
+        return make_batch_detect_error("encoder output is required");
+    }
+
+    try {
+        std::vector<std::future<std::vector<std::pair<std::string, float>>>> futures =
+            m->whisper->detect_language(encoder_output->view);
+
+        size_t batch_size = futures.size();
+        if (batch_size == 0) {
+            return make_batch_detect_error("detect_language returned no results");
+        }
+
+        ct2_batch_detect_result out{};
+        out.batch_size = batch_size;
+        out.languages = static_cast<char**>(std::calloc(batch_size, sizeof(char*)));
+        out.probabilities = static_cast<float*>(std::calloc(batch_size, sizeof(float)));
+        if (!out.languages || !out.probabilities) {
+            ct2_batch_detect_result_free(&out);
+            return make_batch_detect_error("failed to allocate batch detect result");
+        }
+
+        for (size_t b = 0; b < batch_size; ++b) {
+            auto results = futures[b].get();
+            if (results.empty()) {
+                continue;  // leave nullptr/zero for this item
+            }
+            const auto& best = results.front();
+            out.languages[b] = copy_string(best.first);
+            out.probabilities[b] = best.second;
+            if (out.languages[b] == nullptr) {
+                ct2_batch_detect_result_free(&out);
+                return make_batch_detect_error("failed to allocate language result");
+            }
+        }
+
+        return out;
+    } catch (const std::exception& e) {
+        return make_batch_detect_error(e.what());
+    }
+}
+
+void ct2_batch_detect_result_free(ct2_batch_detect_result* r) {
+    if (r == nullptr) {
+        return;
+    }
+    if (r->languages != nullptr) {
+        for (size_t i = 0; i < r->batch_size; ++i) {
+            std::free(r->languages[i]);
+        }
+        std::free(r->languages);
+    }
+    std::free(r->probabilities);
+    std::free(r->error);
+    *r = ct2_batch_detect_result{};
 }
 
 }  // extern "C"

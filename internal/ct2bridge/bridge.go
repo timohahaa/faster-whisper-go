@@ -222,6 +222,48 @@ func (m *Model) DetectLanguage(enc *EncoderOutput) (DetectLanguageResult, error)
 	}, nil
 }
 
+// BatchDetectLanguageResult holds per-item language detection results.
+type BatchDetectLanguageResult struct {
+	Items []DetectLanguageResult
+}
+
+// DetectLanguageBatch detects the most likely spoken language for every item of
+// a batched encoder output in a single native call. The number of results
+// equals the encoder output's batch dimension.
+func (m *Model) DetectLanguageBatch(enc *EncoderOutput) (BatchDetectLanguageResult, error) {
+	if m == nil || m.ptr == nil {
+		return BatchDetectLanguageResult{}, errors.New("model is closed")
+	}
+	if enc == nil || enc.ptr == nil {
+		return BatchDetectLanguageResult{}, errors.New("encoder output is required")
+	}
+
+	result := C.ct2_detect_language_batch(m.ptr, enc.ptr)
+	defer C.ct2_batch_detect_result_free(&result)
+
+	if result.error != nil {
+		return BatchDetectLanguageResult{}, errors.New(C.GoString(result.error))
+	}
+
+	batchSize := int(result.batch_size)
+	langs := unsafe.Slice(result.languages, batchSize)
+	probs := unsafe.Slice(result.probabilities, batchSize)
+
+	items := make([]DetectLanguageResult, batchSize)
+	for b := 0; b < batchSize; b++ {
+		lang := ""
+		if langs[b] != nil {
+			lang = C.GoString(langs[b])
+		}
+		items[b] = DetectLanguageResult{
+			Language:    lang,
+			Probability: float32(probs[b]),
+		}
+	}
+
+	return BatchDetectLanguageResult{Items: items}, nil
+}
+
 // AlignResult holds the raw DTW alignment output from CTranslate2's align pass.
 type AlignResult struct {
 	TextTokenProbs []float32 // per-token probability [NumTokens]
@@ -290,6 +332,132 @@ func (m *Model) Align(enc *EncoderOutput, startSeq, textTokens []int32, numFrame
 		TimeIndices:    timeIdx,
 		NumTokens:      nTokens,
 	}, nil
+}
+
+// BatchAlignResult holds per-item alignment results from a batched align call.
+type BatchAlignResult struct {
+	Items []AlignResult
+}
+
+// AlignBatch computes cross-attention alignment for a whole batched encoder
+// output in a single native call. textTokens and numFrames are per batch item
+// and must match the encoder output's batch dimension. Per-item token slices
+// may be empty; the corresponding result is returned with zero
+// tokens/alignments.
+func (m *Model) AlignBatch(
+	enc *EncoderOutput,
+	startSeq []int32,
+	textTokens [][]int32,
+	numFrames []int,
+	medianFilterWidth int,
+) (BatchAlignResult, error) {
+	if m == nil || m.ptr == nil {
+		return BatchAlignResult{}, errors.New("model is closed")
+	}
+	if enc == nil || enc.ptr == nil {
+		return BatchAlignResult{}, errors.New("encoder output is required")
+	}
+	batchSize := len(textTokens)
+	if batchSize == 0 {
+		return BatchAlignResult{}, errors.New("text tokens are required")
+	}
+	if len(numFrames) != batchSize {
+		return BatchAlignResult{}, errors.New("num frames count mismatch")
+	}
+
+	var startPtr *C.int32_t
+	if len(startSeq) > 0 {
+		startPtr = (*C.int32_t)(unsafe.Pointer(&startSeq[0]))
+	}
+
+	// Flatten per-item tokens into a single C-allocated buffer to satisfy cgo
+	// pointer rules (Go pointers containing Go pointers cannot be passed to C).
+	totalTokens := 0
+	for _, t := range textTokens {
+		totalTokens += len(t)
+	}
+	// Allocate at least one element so the base pointer is always valid.
+	cTokensBuf := (*C.int32_t)(C.malloc(C.size_t(totalTokens+1) * C.size_t(unsafe.Sizeof(C.int32_t(0)))))
+	defer C.free(unsafe.Pointer(cTokensBuf))
+	cTokPtrs := (**C.int32_t)(C.malloc(C.size_t(batchSize) * C.size_t(unsafe.Sizeof(cTokensBuf))))
+	defer C.free(unsafe.Pointer(cTokPtrs))
+	cTokCounts := (*C.size_t)(C.malloc(C.size_t(batchSize) * C.size_t(unsafe.Sizeof(C.size_t(0)))))
+	defer C.free(unsafe.Pointer(cTokCounts))
+	cNumFrames := (*C.size_t)(C.malloc(C.size_t(batchSize) * C.size_t(unsafe.Sizeof(C.size_t(0)))))
+	defer C.free(unsafe.Pointer(cNumFrames))
+
+	tokPtrsSlice := unsafe.Slice(cTokPtrs, batchSize)
+	tokCountsSlice := unsafe.Slice(cTokCounts, batchSize)
+	numFramesSlice := unsafe.Slice(cNumFrames, batchSize)
+	tokensBufSlice := unsafe.Slice(cTokensBuf, totalTokens+1)
+
+	offset := 0
+	for i, t := range textTokens {
+		tokCountsSlice[i] = C.size_t(len(t))
+		numFramesSlice[i] = C.size_t(numFrames[i])
+		if len(t) > 0 {
+			tokPtrsSlice[i] = &tokensBufSlice[offset]
+			for j, tok := range t {
+				tokensBufSlice[offset+j] = C.int32_t(tok)
+			}
+			offset += len(t)
+		} else {
+			tokPtrsSlice[i] = nil
+		}
+	}
+
+	result := C.ct2_align_batch(
+		m.ptr,
+		enc.ptr,
+		startPtr,
+		C.size_t(len(startSeq)),
+		cTokPtrs,
+		cTokCounts,
+		cNumFrames,
+		C.size_t(batchSize),
+		C.int(medianFilterWidth),
+	)
+	defer C.ct2_batch_align_result_free(&result)
+
+	if result.error != nil {
+		return BatchAlignResult{}, errors.New(C.GoString(result.error))
+	}
+
+	numTokens := unsafe.Slice(result.num_tokens, batchSize)
+	probsPtrs := unsafe.Slice(result.text_token_probs, batchSize)
+	numAligns := unsafe.Slice(result.num_alignments, batchSize)
+	textIdxPtrs := unsafe.Slice(result.text_indices, batchSize)
+	timeIdxPtrs := unsafe.Slice(result.time_indices, batchSize)
+
+	items := make([]AlignResult, batchSize)
+	for b := 0; b < batchSize; b++ {
+		nTok := int(numTokens[b])
+		nAlign := int(numAligns[b])
+
+		probs := make([]float32, nTok)
+		if nTok > 0 && probsPtrs[b] != nil {
+			copy(probs, unsafe.Slice((*float32)(unsafe.Pointer(probsPtrs[b])), nTok))
+		}
+		textIdx := make([]int32, nAlign)
+		timeIdx := make([]int32, nAlign)
+		if nAlign > 0 {
+			if textIdxPtrs[b] != nil {
+				copy(textIdx, unsafe.Slice((*int32)(unsafe.Pointer(textIdxPtrs[b])), nAlign))
+			}
+			if timeIdxPtrs[b] != nil {
+				copy(timeIdx, unsafe.Slice((*int32)(unsafe.Pointer(timeIdxPtrs[b])), nAlign))
+			}
+		}
+
+		items[b] = AlignResult{
+			TextTokenProbs: probs,
+			TextIndices:    textIdx,
+			TimeIndices:    timeIdx,
+			NumTokens:      nTok,
+		}
+	}
+
+	return BatchAlignResult{Items: items}, nil
 }
 
 // EncodeBatch runs the Whisper encoder on a batch of mel spectrograms.
@@ -417,24 +585,6 @@ func (m *Model) GenerateBatch(enc *EncoderOutput, prompts [][]int32, opts Genera
 	}
 
 	return BatchGenerateResult{Items: items}, nil
-}
-
-// Slice extracts a single-item encoder output from a batched encoder output.
-// The returned EncoderOutput is an independent copy and must be freed separately.
-func (e *EncoderOutput) Slice(index int) (*EncoderOutput, error) {
-	if e == nil || e.ptr == nil {
-		return nil, errors.New("encoder output is nil")
-	}
-
-	var cErr *C.char
-	ptr := C.ct2_encoder_output_slice(e.ptr, C.size_t(index), &cErr)
-	if ptr == nil {
-		err := errors.New(C.GoString(cErr))
-		C.free(unsafe.Pointer(cErr))
-		return nil, err
-	}
-
-	return &EncoderOutput{ptr: ptr}, nil
 }
 
 func cInt32Slice(ptr *C.int32_t, count int) []int32 {
