@@ -194,7 +194,7 @@ func (m *Model) detectLanguageFromMel(mel []float32, totalFrames, seekOffset int
 	if err != nil {
 		return "", 0, err
 	}
-	return result.Language, result.Probability, nil
+	return normalizeLangCode(result.Language), result.Probability, nil
 }
 
 type processWindowParams struct {
@@ -236,7 +236,7 @@ func (m *Model) processWindow(p processWindowParams) (windowResult, error) {
 	lang := p.lang
 	if p.cfg.Multilingual && m.IsMultilingual() {
 		if result, dlErr := m.bridge.DetectLanguage(enc); dlErr == nil {
-			lang = result.Language
+			lang = normalizeLangCode(result.Language)
 		}
 	}
 

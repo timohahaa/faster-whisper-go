@@ -18,6 +18,15 @@ type ModelConfig struct {
 	// speech detection: VadBackendSilero ("silero", default) or
 	// VadBackendPyannote ("pyannote")
 	VadBackend string
+
+	// VadCPUThreads sets the number of onnxruntime intra-op (matmul) threads the
+	// pyannote VAD session may use on CPU. VAD runs a heavily overlapping sliding
+	// window over the whole audio and is CPU-bound, so this is its dominant cost.
+	// 0 uses an autoscaled default (see pyannotevad.DefaultIntraOpThreads).
+	// When running many models concurrently (e.g. one replica per GPU), set this
+	// to roughly totalCPU/numReplicas to avoid oversubscription.
+	// Ignored by the silero backend.
+	VadCPUThreads int
 }
 
 // DefaultModelConfig returns sensible defaults for CPU inference.

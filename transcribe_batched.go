@@ -156,7 +156,7 @@ func (m *Model) inferBatched(ctx context.Context, samples []float32, cfg Transcr
 			if err != nil {
 				return nil, err
 			}
-			lang = result.Language
+			lang = normalizeLangCode(result.Language)
 			langProb = result.Probability
 		} else {
 			lang = "en"
@@ -373,14 +373,10 @@ func (m *Model) inferBatched(ctx context.Context, samples []float32, cfg Transcr
 		}
 	}
 
-	// Restore timestamps if VAD was used.
-	if !clipTimestampsProvided && len(speechChunks) > 0 {
-		tsMap := newSpeechTimestampsMap(speechChunks)
-		for i := range allSegments {
-			tsMap.restoreSegmentTimestamps(&allSegments[i])
-		}
-	}
-
+	// Segment and word timestamps are already in the original audio timeline:
+	// collectChunksBatched extracts contiguous windows and reports their offsets
+	// in original time, so no compressed->original remapping is needed here
+	// (matching the ClipTimestamps path above).
 	if cfg.FilterHallucinationPhrases {
 		allSegments = filterHallucinationPhrases(allSegments, lang)
 	}

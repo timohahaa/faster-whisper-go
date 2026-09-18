@@ -437,11 +437,23 @@ func (t *tokenizer) suppressedTokens(suppress []int32) []int32 {
 }
 
 // languageToken returns the token ID for a language code, or -1 if not found.
+// It accepts both the bare code ("en") and the token form ("<|en|>").
 func (t *tokenizer) languageToken(lang string) int32 {
-	if id, ok := t.langToToken[lang]; ok {
+	if id, ok := t.langToToken[normalizeLangCode(lang)]; ok {
 		return id
 	}
 	return -1
+}
+
+// normalizeLangCode strips the "<|xx|>" token markup from a language code,
+// returning the bare code (e.g. "<|en|>" -> "en"). Bare codes pass through
+// unchanged. CTranslate2's language detection returns the token form, whereas
+// the tokenizer's language map is keyed by bare codes.
+func normalizeLangCode(lang string) string {
+	if isLangToken(lang) {
+		return lang[2 : len(lang)-2]
+	}
+	return lang
 }
 
 func isLangToken(s string) bool {

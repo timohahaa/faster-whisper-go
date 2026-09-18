@@ -95,7 +95,7 @@ func Load(modelSizeOrPath string, cfg ModelConfig) (*Model, error) {
 	dense := computeMelFilterbank(nMels, whisperNFFT, whisperSampleRate)
 	sparse := buildSparseFilters(dense, nMels, whisperFreqBins)
 
-	vad, err := newVadEngine(cfg.VadBackend)
+	vad, err := newVadEngine(cfg.VadBackend, cfg.VadCPUThreads)
 	if err != nil {
 		bridge.Close()
 		return nil, err
@@ -127,11 +127,17 @@ func (m *Model) Close() {
 }
 
 // newVadEngine constructs the VAD backend selected by backend
-// (VadBackendSilero by default, or VadBackendPyannote).
-func newVadEngine(backend string) (vadEngine, error) {
+// (VadBackendSilero by default, or VadBackendPyannote). vadCPUThreads sets the
+// pyannote onnxruntime intra-op thread count (0 = autoscaled default); it is
+// ignored by the silero backend.
+func newVadEngine(backend string, vadCPUThreads int) (vadEngine, error) {
 	switch backend {
 	case VadBackendPyannote:
-		vad, err := pyannotevad.New()
+		threads := vadCPUThreads
+		if threads <= 0 {
+			threads = pyannotevad.DefaultIntraOpThreads
+		}
+		vad, err := pyannotevad.NewWithThreads(threads)
 		if err != nil {
 			return nil, fmt.Errorf("init pyannote vad: %w", err)
 		}

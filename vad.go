@@ -245,49 +245,53 @@ type chunkMetadata struct {
 	duration float64 // seconds of speech in this chunk
 }
 
-// collectChunksBatched groups speech chunks into audio segments of at most
-// maxDuration seconds. Returns the audio buffers and their metadata.
-// Chunks are merged greedily until adding the next one would exceed maxDuration.
+// collectChunksBatched groups consecutive speech regions into contiguous audio
+// windows spanning at most maxDuration seconds of wall-clock time. Each window's
+// audio is the original slice [firstRegionStart, lastRegionEnd] (internal
+// silence preserved), and its offset/duration are in the original audio
+// timeline. Returns the audio buffers and their metadata.
 func collectChunksBatched(samples []float32, chunks []SpeechChunk, maxDuration float64) ([][]float32, []chunkMetadata) {
 	if len(chunks) == 0 {
 		return [][]float32{{}}, []chunkMetadata{{}}
 	}
 
-	maxSamples := maxDuration * whisperSampleRate
+	maxSamples := int(maxDuration * whisperSampleRate)
 
 	var audioChunks [][]float32
 	var metadata []chunkMetadata
 
-	var currentAudio []float32
-	var currentDuration float64
-	var totalDuration float64
+	// Group consecutive speech regions into windows spanning at most maxDuration
+	// seconds of wall-clock time, then extract the *contiguous* audio for each
+	// window (including any silence between regions) so the encoder sees natural
+	// audio. Offsets/durations are in the original audio timeline; this mirrors
+	// the batched inference pipeline's merge_chunks + audio_split. A window is
+	// cut on a region boundary when adding the next region would exceed the span.
+	curStart := chunks[0].Start
+	curEnd := 0
 
-	for _, chunk := range chunks {
-		chunkLen := float64(chunk.End - chunk.Start)
-
-		if currentDuration+chunkLen > maxSamples {
-			audioChunks = append(audioChunks, currentAudio)
-			metadata = append(metadata, chunkMetadata{
-				offset:   totalDuration / whisperSampleRate,
-				duration: currentDuration / whisperSampleRate,
-			})
-			totalDuration += currentDuration
-
-			start, end := clampRange(chunk.Start, chunk.End, len(samples))
-			currentAudio = append([]float32(nil), samples[start:end]...)
-			currentDuration = chunkLen
-		} else {
-			start, end := clampRange(chunk.Start, chunk.End, len(samples))
-			currentAudio = append(currentAudio, samples[start:end]...)
-			currentDuration += chunkLen
+	flush := func() {
+		start, end := clampRange(curStart, curEnd, len(samples))
+		if end < start {
+			end = start
 		}
+		// Each window is a contiguous span of the original audio, so return a
+		// sub-slice instead of copying (the mel stage only reads it). Avoids
+		// duplicating the whole speech portion of the audio per transcription.
+		audioChunks = append(audioChunks, samples[start:end])
+		metadata = append(metadata, chunkMetadata{
+			offset:   float64(curStart) / whisperSampleRate,
+			duration: float64(curEnd-curStart) / whisperSampleRate,
+		})
 	}
 
-	audioChunks = append(audioChunks, currentAudio)
-	metadata = append(metadata, chunkMetadata{
-		offset:   totalDuration / whisperSampleRate,
-		duration: currentDuration / whisperSampleRate,
-	})
+	for _, chunk := range chunks {
+		if chunk.End-curStart > maxSamples && curEnd-curStart > 0 {
+			flush()
+			curStart = chunk.Start
+		}
+		curEnd = chunk.End
+	}
+	flush()
 
 	return audioChunks, metadata
 }

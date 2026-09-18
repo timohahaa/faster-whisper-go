@@ -35,12 +35,14 @@ type vadSpec struct {
 }
 
 type config struct {
-	Model       string `json:"model"`
-	Device      string `json:"device"`
-	DeviceIndex int    `json:"device_index"`
-	ComputeType string `json:"compute_type"`
-	CPUThreads  int    `json:"cpu_threads"`
-	NumWorkers  int    `json:"num_workers"`
+	Model         string `json:"model"`
+	Device        string `json:"device"`
+	DeviceIndex   int    `json:"device_index"`
+	ComputeType   string `json:"compute_type"`
+	CPUThreads    int    `json:"cpu_threads"`
+	NumWorkers    int    `json:"num_workers"`
+	VadBackend    string `json:"vad_backend"`
+	VadCPUThreads int    `json:"vad_cpu_threads"`
 
 	BatchSize      int  `json:"batch_size"`
 	WordTimestamps bool `json:"word_timestamps"`
@@ -159,11 +161,13 @@ func main() {
 	fmt.Printf("loading model=%s device=%s compute_type=%s ...\n", cfg.Model, cfg.Device, cfg.ComputeType)
 	loadStart := time.Now()
 	model, err := whisper.Load(cfg.Model, whisper.ModelConfig{
-		Device:      cfg.Device,
-		ComputeType: cfg.ComputeType,
-		DeviceIndex: []int{cfg.DeviceIndex},
-		CPUThreads:  cfg.CPUThreads,
-		NumWorkers:  cfg.NumWorkers,
+		Device:        cfg.Device,
+		ComputeType:   cfg.ComputeType,
+		DeviceIndex:   []int{cfg.DeviceIndex},
+		CPUThreads:    cfg.CPUThreads,
+		NumWorkers:    cfg.NumWorkers,
+		VadBackend:    cfg.VadBackend,
+		VadCPUThreads: cfg.VadCPUThreads,
 	})
 	if err != nil {
 		fail("load model: %v", err)

@@ -46,6 +46,22 @@ const (
 	batchWindows = 32
 )
 
+// DefaultIntraOpThreads is the default number of onnxruntime intra-op threads
+// used by New. It scales with the machine's CPU count (capped) so VAD is not
+// pinned to a single core, while leaving headroom for the rest of the pipeline.
+var DefaultIntraOpThreads = defaultIntraOpThreads()
+
+func defaultIntraOpThreads() int {
+	// The segmentation model is small (SincNet + LSTM); benchmarks show intra-op
+	// scaling plateaus around 4 threads (≈3x over single-thread), while higher
+	// counts risk CPU oversubscription when several models run VAD concurrently
+	// (e.g. one replica per GPU in a single process). Cap at 4.
+	n := runtime.NumCPU()
+	n = min(n, 4)
+	n = max(n, 1)
+	return n
+}
+
 // candidateLibPaths lists common locations of the onnxruntime shared library,
 // tried in order when ONNXRUNTIME_SHARED_LIBRARY_PATH is not set.
 func candidateLibPaths() []string {
@@ -101,8 +117,19 @@ type VAD struct {
 	mu      sync.Mutex
 }
 
-// New creates a pyannote VAD instance backed by the embedded ONNX model.
+// New creates a pyannote VAD instance backed by the embedded ONNX model, using
+// the default intra-op thread count (see DefaultIntraOpThreads).
 func New() (_ *VAD, err error) {
+	return NewWithThreads(DefaultIntraOpThreads)
+}
+
+// NewWithThreads creates a pyannote VAD instance and configures how many
+// onnxruntime intra-op (matmul) threads the session may use on CPU. The
+// segmentation model is run over the whole audio with a heavily overlapping
+// sliding window, so this is the dominant CPU cost; raising intraOp trades CPU
+// cores for lower VAD latency. intraOp <= 0 falls back to a single thread.
+// interOp is fixed at 1 (windows are already batched into one Run call).
+func NewWithThreads(intraOp int) (_ *VAD, err error) {
 	if err := ensureEnv(); err != nil {
 		return nil, err
 	}
@@ -113,7 +140,10 @@ func New() (_ *VAD, err error) {
 	}
 	defer opts.Destroy()
 
-	_ = opts.SetIntraOpNumThreads(1)
+	if intraOp < 1 {
+		intraOp = 1
+	}
+	_ = opts.SetIntraOpNumThreads(intraOp)
 	_ = opts.SetInterOpNumThreads(1)
 
 	v := &VAD{}
@@ -165,20 +195,14 @@ func (v *VAD) Scores(samples []float32) ([]float32, error) {
 		return nil, nil
 	}
 
-	// Assemble the (numChunks, WindowSamples) input buffer. The trailing partial
-	// window is zero-padded to WindowSamples.
-	input := make([]float32, numChunks*WindowSamples)
-	for c := 0; c < numComplete; c++ {
-		off := c * StepSamples
-		copy(input[c*WindowSamples:(c+1)*WindowSamples], samples[off:off+WindowSamples])
-	}
-	if hasLast {
-		off := numComplete * StepSamples
-		copy(input[numComplete*WindowSamples:], samples[off:n])
-	}
-
 	// Per-window, per-frame max over the speaker slots (pre-aggregation hook).
 	perChunkMax := make([]float32, numChunks*NumFramesPerChunk)
+
+	// Reusable per-batch input buffer. Windows overlap 10x (5s window, 0.5s
+	// step), so materializing every window at once would duplicate the audio
+	// ~10x in memory (hundreds of MB for long files). Instead we stage only one
+	// batch of windows at a time and refill it in place.
+	batchInput := make([]float32, batchWindows*WindowSamples)
 
 	v.mu.Lock()
 	defer v.mu.Unlock()
@@ -187,9 +211,24 @@ func (v *VAD) Scores(samples []float32) ([]float32, error) {
 		end := min(start+batchWindows, numChunks)
 		bs := end - start
 
+		// Copy windows [start, end) into the reusable buffer. Complete windows
+		// fill WindowSamples exactly; the trailing partial window is zero-padded.
+		for c := start; c < end; c++ {
+			dst := batchInput[(c-start)*WindowSamples : (c-start+1)*WindowSamples]
+			off := c * StepSamples
+			if c < numComplete {
+				copy(dst, samples[off:off+WindowSamples])
+			} else {
+				filled := copy(dst, samples[off:n])
+				for i := filled; i < len(dst); i++ {
+					dst[i] = 0
+				}
+			}
+		}
+
 		inTensor, err := ort.NewTensor(
 			ort.NewShape(int64(bs), 1, int64(WindowSamples)),
-			input[start*WindowSamples:end*WindowSamples],
+			batchInput[:bs*WindowSamples],
 		)
 		if err != nil {
 			return nil, fmt.Errorf("create input tensor: %w", err)
