@@ -3,15 +3,22 @@
 #include <cstring>
 #include <future>
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
+#include <ctranslate2/devices.h>
 #include <ctranslate2/models/whisper.h>
 #include <ctranslate2/replica_pool.h>
 #include <ctranslate2/storage_view.h>
 
 struct ct2_model {
     std::unique_ptr<ctranslate2::models::Whisper> whisper;
+    // when the model spans more than one
+    // CUDA device, the encoder output is moved to host memory so any replica
+    // (on any device) can consume it, since we don't know which device will run
+    // the next step. Keeps single-device runs on the GPU (no copy).
+    bool encoder_to_cpu = false;
 };
 
 struct ct2_encoder_output {
@@ -163,6 +170,16 @@ ct2_model* ct2_model_load(
             dev_indices = {0};
         }
 
+        // Decide whether the encoder output must be moved to the host. Base this
+        // on distinct devices from the original list (before the inter_threads
+        // expansion below, which duplicates indices): several replicas on the
+        // same card share device memory, so keeping the output on the GPU is
+        // safe there; only crossing distinct devices requires the host round-trip.
+        const ctranslate2::Device dev = parse_device(device);
+        const std::set<int> distinct_devices(dev_indices.begin(), dev_indices.end());
+        const bool encoder_to_cpu =
+            dev == ctranslate2::Device::CUDA && distinct_devices.size() > 1;
+
         // inter_threads > 1 means multiple replicas per device.
         // CTranslate2 maps one replica per device_index entry,
         // so we repeat each index to get the desired replica count.
@@ -181,9 +198,10 @@ ct2_model* ct2_model_load(
         if (intra_threads > 0) pool_config.num_threads_per_replica = intra_threads;
 
         auto model = std::make_unique<ct2_model>();
+        model->encoder_to_cpu = encoder_to_cpu;
         model->whisper = std::make_unique<ctranslate2::models::Whisper>(
             path,
-            parse_device(device),
+            dev,
             parse_compute_type(compute_type),
             dev_indices,
             /*tensor_parallel=*/false,
@@ -228,7 +246,7 @@ ct2_encoder_output* ct2_encode(
 
     try {
         ctranslate2::StorageView features = make_mel_features(mel, n_mels, n_frames);
-        auto future = m->whisper->encode(features, /*to_cpu=*/false);
+        auto future = m->whisper->encode(features, /*to_cpu=*/m->encoder_to_cpu);
         ctranslate2::StorageView encoded = future.get();
         auto out = new ct2_encoder_output{std::move(encoded)};
         return out;
@@ -239,6 +257,21 @@ ct2_encoder_output* ct2_encode(
 }
 
 void ct2_encoder_output_free(ct2_encoder_output* e) {
+    if (e == nullptr) {
+        return;
+    }
+    // The encoder output may hold GPU memory. Freeing it runs the StorageView
+    // destructor on the caller's (Go) thread, whose current CUDA device is not
+    // necessarily the one the buffer lives on. cudaSetDevice is per-thread, so
+    // set the buffer's device around the free; otherwise a buffer on device >0
+    // gets freed under device 0 and corrupts the context (invalid argument /
+    // illegal memory access). On CPU this is a no-op path.
+    if (e->view.device() == ctranslate2::Device::CUDA) {
+        const ctranslate2::ScopedDeviceSetter scope(
+            e->view.device(), e->view.device_index());
+        delete e;
+        return;
+    }
     delete e;
 }
 
@@ -508,7 +541,7 @@ ct2_encoder_output* ct2_encode_batch(
     try {
         ctranslate2::StorageView features =
             make_mel_features_batch(mel, batch_size, n_mels, n_frames);
-        auto future = m->whisper->encode(features, /*to_cpu=*/false);
+        auto future = m->whisper->encode(features, /*to_cpu=*/m->encoder_to_cpu);
         ctranslate2::StorageView encoded = future.get();
         auto out = new ct2_encoder_output{std::move(encoded)};
         return out;
