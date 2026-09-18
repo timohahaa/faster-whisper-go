@@ -90,7 +90,7 @@ func (m *Model) inferBatched(ctx context.Context, samples []float32, cfg Transcr
 		vadCfg.applyDefaults()
 
 		var err error
-		speechChunks, err = GetSpeechTimestamps(m.vad, samples, *vadCfg)
+		speechChunks, err = m.vad.speechChunks(samples, *vadCfg)
 		if err != nil {
 			return nil, err
 		}

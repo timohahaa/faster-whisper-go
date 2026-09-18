@@ -33,6 +33,15 @@ type VadConfig struct {
 	// UseMaxPossSilAtMaxSpeech: when true, split at the longest silence found
 	// (not just the last one). Default: false.
 	UseMaxPossSilAtMaxSpeech bool
+
+	// Onset is the speech-onset threshold used by the pyannote VAD backend:
+	// a frame becomes active when its activity rises above Onset. Ignored by
+	// the Silero backend. Default: 0.5.
+	Onset float32
+	// Offset is the speech-offset threshold used by the pyannote VAD backend:
+	// an active region ends when activity falls below Offset. Ignored by the
+	// Silero backend. Default: 0.363.
+	Offset float32
 }
 
 func (c *VadConfig) applyDefaults() {
@@ -54,6 +63,12 @@ func (c *VadConfig) applyDefaults() {
 	if c.MinSilenceAtMaxSpeech == 0 {
 		c.MinSilenceAtMaxSpeech = 98
 	}
+	if c.Onset == 0 {
+		c.Onset = 0.5
+	}
+	if c.Offset == 0 {
+		c.Offset = 0.363
+	}
 }
 
 const vadWindowSize = 512 // samples per VAD frame (Silero window size)
@@ -70,7 +85,7 @@ func (m *Model) SpeechTimestamps(samples []float32, cfg VadConfig) ([]SpeechChun
 	if m == nil || m.vad == nil {
 		return nil, fmt.Errorf("whisper: model has no VAD instance")
 	}
-	return GetSpeechTimestamps(m.vad, samples, cfg)
+	return m.vad.speechChunks(samples, cfg)
 }
 
 // GetSpeechTimestamps detects speech regions in 16kHz mono float32 audio.
@@ -219,23 +234,7 @@ func GetSpeechTimestamps(vad *silerovad.VAD, samples []float32, cfg VadConfig) (
 	}
 
 	// Apply padding
-	for i := range speeches {
-		if i == 0 {
-			speeches[i].Start = max(0, speeches[i].Start-speechPadSamples)
-		}
-		if i != len(speeches)-1 {
-			silenceDuration := speeches[i+1].Start - speeches[i].End
-			if silenceDuration < 2*speechPadSamples {
-				speeches[i].End += silenceDuration / 2
-				speeches[i+1].Start = max(0, speeches[i+1].Start-silenceDuration/2)
-			} else {
-				speeches[i].End = min(audioLengthSamples, speeches[i].End+speechPadSamples)
-				speeches[i+1].Start = max(0, speeches[i+1].Start-speechPadSamples)
-			}
-		} else {
-			speeches[i].End = min(audioLengthSamples, speeches[i].End+speechPadSamples)
-		}
-	}
+	applySpeechPadding(speeches, speechPadSamples, audioLengthSamples)
 
 	return speeches, nil
 }

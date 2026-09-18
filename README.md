@@ -2,13 +2,13 @@
 
 Go port of [faster-whisper](https://github.com/SYSTRAN/faster-whisper) — speech-to-text on [CTranslate2](https://github.com/OpenNMT/CTranslate2).
 
-Inference runs through a thin cgo bridge to the CTranslate2 C++ API. VAD uses [Silero VAD v6](https://github.com/snakers4/silero-vad) via onnxruntime. No Python needed.
+Inference runs through a thin cgo bridge to the CTranslate2 C++ API. VAD uses [Silero VAD v6](https://github.com/snakers4/silero-vad) or the pyannote segmentation model via onnxruntime. No Python needed.
 
 ## Features
 
 - Sequential and batched transcription pipelines
 - Word-level timestamps (cross-attention alignment + DTW)
-- Silero VAD for silence filtering
+- Silero or pyannote VAD for silence filtering
 - Auto-download of models from HuggingFace (or use local CTranslate2 model directories)
 - Language detection, translation to English
 - Hallucination phrase filtering
@@ -121,11 +121,36 @@ fmt.Println(det.Language, det.Probability) // "en" 0.98
 
 ### Voice Activity Detection
 
-Each `Model` owns its own Silero VAD instance (a dedicated onnxruntime session
-plus LSTM scratch state), created on `Load` and released on `Close` — a strict
-1:1 relationship between a model and its VAD. This keeps VAD concurrency tied to
-model concurrency: run one model per GPU/worker and its VAD is used by that
-worker's transcription calls.
+Each `Model` owns its own VAD instance (a dedicated onnxruntime session),
+created on `Load` and released on `Close` — a strict 1:1 relationship between a
+model and its VAD. This keeps VAD concurrency tied to model concurrency: run one
+model per GPU/worker and its VAD is used by that worker's transcription calls.
+
+#### Backends
+
+Two VAD backends are available, selected via `ModelConfig.VadBackend`:
+
+- **`silero`** (default) — [Silero VAD v6](https://github.com/snakers4/silero-vad),
+  a streaming LSTM model. Fast and general-purpose.
+- **`pyannote`** — the pyannote segmentation model. It runs a 5s sliding
+  window (0.5s hop), collapses the speaker slots with a per-frame max, and
+  Hamming-aggregates the windows into a speech-activity curve that is binarized
+  with hysteresis (`Onset`/`Offset`). It is markedly less aggressive than Silero
+  on loud/dramatic/music-backed speech, where Silero tends to drop whole
+  segments. 
+
+```go
+model, err := whisper.Load("large-v3", whisper.ModelConfig{
+    Device:      "cuda",
+    VadBackend:  whisper.VadBackendPyannote,
+})
+```
+
+The Go pyannote path is numerically validated against the Python reference
+(scores curve and binarized regions match; see `pyannotevad/parity_test.go`,
+`vad_pyannote_test.go`, and `tools/export_pyannote_vad.py`). The embedded ONNX
+model is exported by that script from the official `pyannote/segmentation`
+(2022) weights.
 
 Detect speech regions directly with the model's VAD:
 

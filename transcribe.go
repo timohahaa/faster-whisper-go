@@ -43,7 +43,7 @@ func (m *Model) infer(ctx context.Context, samples []float32, cfg TranscribeConf
 			vadCfg = &VadConfig{}
 		}
 		var err error
-		speechChunks, err = GetSpeechTimestamps(m.vad, samples, *vadCfg)
+		speechChunks, err = m.vad.speechChunks(samples, *vadCfg)
 		if err != nil {
 			return nil, err
 		}
@@ -63,9 +63,7 @@ func (m *Model) infer(ctx context.Context, samples []float32, cfg TranscribeConf
 	// Drop the trailing feature frame when bounding the seek loop:
 	// contentFrames = totalFrames - 1.
 	contentFrames := totalFrames - 1
-	if contentFrames < 0 {
-		contentFrames = 0
-	}
+	contentFrames = max(contentFrames, 0)
 
 	lang := cfg.Language
 	var langProb float32

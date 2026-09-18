@@ -13,6 +13,11 @@ type ModelConfig struct {
 	CacheDir string
 	// LocalFilesOnly disables network downloads; only cached models are used.
 	LocalFilesOnly bool
+
+	// VadBackend selects the Voice Activity Detection engine used for batched
+	// speech detection: VadBackendSilero ("silero", default) or
+	// VadBackendPyannote ("pyannote")
+	VadBackend string
 }
 
 // DefaultModelConfig returns sensible defaults for CPU inference.

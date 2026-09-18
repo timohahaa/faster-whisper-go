@@ -4,13 +4,45 @@ import (
 	"fmt"
 
 	"github.com/timohahaa/faster-whisper-go/internal/ct2bridge"
+	"github.com/timohahaa/faster-whisper-go/pyannotevad"
 	"github.com/timohahaa/faster-whisper-go/silerovad"
 )
+
+// VAD backend identifiers for ModelConfig.VadBackend.
+const (
+	// VadBackendSilero uses the embedded Silero VAD (default).
+	VadBackendSilero = "silero"
+	// VadBackendPyannote uses the embedded pyannote segmentation VAD (the
+	// official pyannote/segmentation 2022 model).
+	VadBackendPyannote = "pyannote"
+)
+
+// vadEngine abstracts a Voice Activity Detection backend that turns raw audio
+// into speech regions. Implementations are held one-per-model.
+type vadEngine interface {
+	speechChunks(samples []float32, cfg VadConfig) ([]SpeechChunk, error)
+	Close()
+}
+
+// sileroEngine is the vadEngine backed by the Silero VAD.
+type sileroEngine struct {
+	vad *silerovad.VAD
+}
+
+func (e *sileroEngine) speechChunks(samples []float32, cfg VadConfig) ([]SpeechChunk, error) {
+	return GetSpeechTimestamps(e.vad, samples, cfg)
+}
+
+func (e *sileroEngine) Close() {
+	if e.vad != nil {
+		e.vad.Close()
+	}
+}
 
 // Model is a loaded Whisper model ready for transcription.
 type Model struct {
 	bridge         *ct2bridge.Model
-	vad            *silerovad.VAD
+	vad            vadEngine
 	tokenizer      *tokenizer
 	nMels          int
 	sparseFilters  []melFilterSpan
@@ -63,10 +95,10 @@ func Load(modelSizeOrPath string, cfg ModelConfig) (*Model, error) {
 	dense := computeMelFilterbank(nMels, whisperNFFT, whisperSampleRate)
 	sparse := buildSparseFilters(dense, nMels, whisperFreqBins)
 
-	vad, err := silerovad.New()
+	vad, err := newVadEngine(cfg.VadBackend)
 	if err != nil {
 		bridge.Close()
-		return nil, fmt.Errorf("init silero vad: %w", err)
+		return nil, err
 	}
 
 	return &Model{
@@ -91,6 +123,27 @@ func (m *Model) Close() {
 	if m.vad != nil {
 		m.vad.Close()
 		m.vad = nil
+	}
+}
+
+// newVadEngine constructs the VAD backend selected by backend
+// (VadBackendSilero by default, or VadBackendPyannote).
+func newVadEngine(backend string) (vadEngine, error) {
+	switch backend {
+	case VadBackendPyannote:
+		vad, err := pyannotevad.New()
+		if err != nil {
+			return nil, fmt.Errorf("init pyannote vad: %w", err)
+		}
+		return &pyannoteEngine{vad: vad}, nil
+	case "", VadBackendSilero:
+		vad, err := silerovad.New()
+		if err != nil {
+			return nil, fmt.Errorf("init silero vad: %w", err)
+		}
+		return &sileroEngine{vad: vad}, nil
+	default:
+		return nil, fmt.Errorf("unknown VAD backend %q", backend)
 	}
 }
 
