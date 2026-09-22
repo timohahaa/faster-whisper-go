@@ -45,6 +45,9 @@ func (m *Model) inferBatched(ctx context.Context, samples []float32, cfg Transcr
 		return nil, err
 	}
 
+	start := time.Now()
+	var tim Timings
+
 	cfg.applyDefaults()
 	if cfg.BatchSize == 0 {
 		cfg.BatchSize = defaultBatchSize
@@ -90,7 +93,9 @@ func (m *Model) inferBatched(ctx context.Context, samples []float32, cfg Transcr
 		vadCfg.applyDefaults()
 
 		var err error
+		vadStart := time.Now()
 		speechChunks, err = m.vad.speechChunks(samples, *vadCfg)
+		tim.VAD = time.Since(vadStart)
 		if err != nil {
 			return nil, err
 		}
@@ -120,6 +125,7 @@ func (m *Model) inferBatched(ctx context.Context, samples []float32, cfg Transcr
 	if melWorkers < 1 {
 		melWorkers = 1
 	}
+	melStart := time.Now()
 	var melWG sync.WaitGroup
 	melIdx := make(chan int, len(audioChunks))
 	for i := range audioChunks {
@@ -140,11 +146,13 @@ func (m *Model) inferBatched(ctx context.Context, samples []float32, cfg Transcr
 		}()
 	}
 	melWG.Wait()
+	tim.Mel = time.Since(melStart)
 
 	// Detect language if needed.
 	lang := cfg.Language
 	var langProb float32
 
+	langStart := time.Now()
 	if lang == "" && m.IsMultilingual() {
 		if len(melChunks) > 0 {
 			enc, err := m.bridge.Encode(melChunks[0], m.nMels, whisperNFrames)
@@ -168,6 +176,7 @@ func (m *Model) inferBatched(ctx context.Context, samples []float32, cfg Transcr
 	} else {
 		langProb = 1.0
 	}
+	tim.LangDetect = time.Since(langStart)
 
 	suppressTokens := m.tokenizer.suppressedTokens(cfg.SuppressTokens)
 
@@ -222,6 +231,7 @@ func (m *Model) inferBatched(ctx context.Context, samples []float32, cfg Transcr
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
+		tim.NumBatches++
 
 		batchEnd := batchStart + cfg.BatchSize
 		if batchEnd > nChunks {
@@ -232,7 +242,9 @@ func (m *Model) inferBatched(ctx context.Context, samples []float32, cfg Transcr
 		batchSize := len(batchMels)
 
 		flatMel := stackMelBatch(batchMels)
+		encStart := time.Now()
 		enc, err := m.bridge.EncodeBatch(flatMel, batchSize, m.nMels, whisperNFrames)
+		tim.Encode += time.Since(encStart)
 		if err != nil {
 			return nil, err
 		}
@@ -267,7 +279,9 @@ func (m *Model) inferBatched(ctx context.Context, samples []float32, cfg Transcr
 			}
 		}
 
+		decStart := time.Now()
 		batchResult, err := m.bridge.GenerateBatch(enc, prompts, opts)
+		tim.Decode += time.Since(decStart)
 		if err != nil {
 			enc.Free()
 			return nil, err
@@ -341,9 +355,11 @@ func (m *Model) inferBatched(ctx context.Context, samples []float32, cfg Transcr
 			}
 
 			startSeq := m.buildAlignStartSequence(lang, taskToken)
+			alignStart := time.Now()
 			batchAlign, alignErr := m.bridge.AlignBatch(
 				enc, startSeq, textTokensList, numFramesList, defaultMedianFilterWidth,
 			)
+			tim.Align += time.Since(alignStart)
 			if alignErr == nil {
 				for i := range batchSize {
 					cr := &chunkResults[i]
@@ -381,6 +397,9 @@ func (m *Model) inferBatched(ctx context.Context, samples []float32, cfg Transcr
 		allSegments = filterHallucinationPhrases(allSegments, lang)
 	}
 
+	tim.Total = time.Since(start)
+	tim.NumChunks = nChunks
+
 	return &Result{
 		Text:     joinSegmentsText(allSegments),
 		Segments: allSegments,
@@ -390,6 +409,7 @@ func (m *Model) inferBatched(ctx context.Context, samples []float32, cfg Transcr
 			Duration:            duration,
 			DurationAfterVad:    durationAfterVad,
 		},
+		Timings: tim,
 	}, nil
 }
 
