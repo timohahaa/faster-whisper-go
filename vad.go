@@ -250,38 +250,22 @@ type chunkMetadata struct {
 // audio is the original slice [firstRegionStart, lastRegionEnd] (internal
 // silence preserved), and its offset/duration are in the original audio
 // timeline. Returns the audio buffers and their metadata.
-func collectChunksBatched(samples []float32, chunks []SpeechChunk, maxDuration float64) ([][]float32, []chunkMetadata) {
+// mergeSpeechChunks groups consecutive speech regions into contiguous windows
+// spanning at most maxSamples samples of wall-clock audio, returning the merged
+// window boundaries (each window includes any silence between the regions it
+// covers). A window is cut on a region boundary when adding the next region
+// would exceed the span.
+func mergeSpeechChunks(chunks []SpeechChunk, maxSamples int) []SpeechChunk {
 	if len(chunks) == 0 {
-		return [][]float32{{}}, []chunkMetadata{{}}
+		return nil
 	}
 
-	maxSamples := int(maxDuration * whisperSampleRate)
-
-	var audioChunks [][]float32
-	var metadata []chunkMetadata
-
-	// Group consecutive speech regions into windows spanning at most maxDuration
-	// seconds of wall-clock time, then extract the *contiguous* audio for each
-	// window (including any silence between regions) so the encoder sees natural
-	// audio. Offsets/durations are in the original audio timeline; this mirrors
-	// the batched inference pipeline's merge_chunks + audio_split. A window is
-	// cut on a region boundary when adding the next region would exceed the span.
+	out := make([]SpeechChunk, 0, len(chunks))
 	curStart := chunks[0].Start
 	curEnd := 0
 
 	flush := func() {
-		start, end := clampRange(curStart, curEnd, len(samples))
-		if end < start {
-			end = start
-		}
-		// Each window is a contiguous span of the original audio, so return a
-		// sub-slice instead of copying (the mel stage only reads it). Avoids
-		// duplicating the whole speech portion of the audio per transcription.
-		audioChunks = append(audioChunks, samples[start:end])
-		metadata = append(metadata, chunkMetadata{
-			offset:   float64(curStart) / whisperSampleRate,
-			duration: float64(curEnd-curStart) / whisperSampleRate,
-		})
+		out = append(out, SpeechChunk{Start: curStart, End: curEnd})
 	}
 
 	for _, chunk := range chunks {
@@ -292,6 +276,37 @@ func collectChunksBatched(samples []float32, chunks []SpeechChunk, maxDuration f
 		curEnd = chunk.End
 	}
 	flush()
+
+	return out
+}
+
+func collectChunksBatched(samples []float32, chunks []SpeechChunk, maxDuration float64) ([][]float32, []chunkMetadata) {
+	if len(chunks) == 0 {
+		return [][]float32{{}}, []chunkMetadata{{}}
+	}
+
+	merged := mergeSpeechChunks(chunks, int(maxDuration*whisperSampleRate))
+
+	audioChunks := make([][]float32, 0, len(merged))
+	metadata := make([]chunkMetadata, 0, len(merged))
+
+	for _, m := range merged {
+		// Offsets/durations are in the original audio timeline (unclamped);
+		// this mirrors the batched inference pipeline's merge_chunks +
+		// audio_split.
+		start, end := clampRange(m.Start, m.End, len(samples))
+		if end < start {
+			end = start
+		}
+		// Each window is a contiguous span of the original audio, so return a
+		// sub-slice instead of copying (the mel stage only reads it). Avoids
+		// duplicating the whole speech portion of the audio per transcription.
+		audioChunks = append(audioChunks, samples[start:end])
+		metadata = append(metadata, chunkMetadata{
+			offset:   float64(m.Start) / whisperSampleRate,
+			duration: float64(m.End-m.Start) / whisperSampleRate,
+		})
+	}
 
 	return audioChunks, metadata
 }
