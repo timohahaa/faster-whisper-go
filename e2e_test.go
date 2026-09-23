@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -90,6 +91,58 @@ func TestTranscribeBatchedWAV(t *testing.T) {
 	t.Logf("transcription: %s", result.Text)
 	t.Logf("segments: %d, language: %s (prob=%.2f)",
 		len(result.Segments), result.Info.Language, result.Info.LanguageProbability)
+}
+
+// TestTranscribeBatchedConcurrentReplicas runs several TranscribeBatched calls
+// at once on one Model with two replicas (shared weights, one worker thread
+// each). Every result must match a sequential run. Run it with -race.
+func TestTranscribeBatchedConcurrentReplicas(t *testing.T) {
+	samples, err := readWAV(filepath.Join(testdataDir, "test.wav"))
+	if err != nil {
+		t.Fatalf("readWAV: %v", err)
+	}
+
+	modelCfg := DefaultModelConfig()
+	modelCfg.NumWorkers = 2
+	model, err := Load("tiny", modelCfg)
+	if err != nil {
+		t.Fatalf("Load model: %v", err)
+	}
+	defer model.Close()
+
+	cfg := DefaultTranscribeConfig()
+	cfg.Language = "en"
+	cfg.WordTimestamps = true
+
+	want, err := model.TranscribeBatched(context.Background(), samples, cfg)
+	if err != nil {
+		t.Fatalf("sequential TranscribeBatched: %v", err)
+	}
+
+	const concurrentCalls = 4
+	results := make([]*Result, concurrentCalls)
+	errs := make([]error, concurrentCalls)
+	var wg sync.WaitGroup
+	for i := range concurrentCalls {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			results[i], errs[i] = model.TranscribeBatched(context.Background(), samples, cfg)
+		}(i)
+	}
+	wg.Wait()
+
+	for i := range concurrentCalls {
+		if errs[i] != nil {
+			t.Fatalf("concurrent call %d: %v", i, errs[i])
+		}
+		if results[i].Text != want.Text {
+			t.Errorf("concurrent call %d: text mismatch\n got: %q\nwant: %q", i, results[i].Text, want.Text)
+		}
+		if len(results[i].Segments) != len(want.Segments) {
+			t.Errorf("concurrent call %d: %d segments, want %d", i, len(results[i].Segments), len(want.Segments))
+		}
+	}
 }
 
 // readWAV reads a 16-bit PCM mono 16kHz WAV file and returns float32 samples in [-1, 1].

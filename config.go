@@ -6,7 +6,12 @@ type ModelConfig struct {
 	ComputeType string // "int8", "float16", "float32", "default"
 	DeviceIndex []int  // GPU device IDs to use; nil/empty defaults to [0]
 	CPUThreads  int    // threads per replica (intra_threads); 0 = CTranslate2 default (4)
-	NumWorkers  int    // number of replicas (inter_threads); 0 = 1
+	// NumWorkers is the number of replicas per device (inter_threads); 0 = 1.
+	// Replicas on a device share one copy of the weights; each adds its own
+	// worker thread and activation memory. Every call blocks until its own job
+	// finishes, so extra replicas only run in parallel when the Model is called
+	// from several goroutines at once (Model is safe for concurrent use).
+	NumWorkers int
 
 	// CacheDir is the directory for caching downloaded models.
 	// Empty uses $XDG_CACHE_HOME/faster-whisper-go/ or ~/.cache/faster-whisper-go/.

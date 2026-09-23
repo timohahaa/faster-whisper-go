@@ -132,6 +132,8 @@ func loadTokenizer(modelDir string) (*tokenizer, error) {
 		return nil, err
 	}
 
+	t.nonSpeechCache = t.computeNonSpeechTokens()
+
 	return t, nil
 }
 
@@ -349,12 +351,18 @@ func (t *tokenizer) bpeEncode(word string) []int32 {
 
 // nonSpeechTokens returns the standard set of token IDs to suppress
 // to avoid non-speech annotations like ♪♪♪, (SPEAKING FOREIGN LANGUAGE), [DAVID], etc.
-// The result is cached after the first computation.
+// The set is precomputed in loadTokenizer; a tokenizer built without it (tests)
+// gets a fresh computation that is not stored, so this method never writes to t
+// and is safe for concurrent use.
 func (t *tokenizer) nonSpeechTokens() []int32 {
 	if t.nonSpeechCache != nil {
 		return t.nonSpeechCache
 	}
+	return t.computeNonSpeechTokens()
+}
 
+// computeNonSpeechTokens builds the non-speech suppression set from the vocabulary.
+func (t *tokenizer) computeNonSpeechTokens() []int32 {
 	symbols := []string{
 		`"`, "#", "(", ")", "*", "+", "/", ":", ";", "<", "=", ">", "@",
 		"[", "\\", "]", "^", "_", "`", "{", "|", "}", "~",
@@ -400,9 +408,7 @@ func (t *tokenizer) nonSpeechTokens() []int32 {
 		}
 	}
 
-	result := slices.Sorted(maps.Keys(resultSet))
-	t.nonSpeechCache = result
-	return result
+	return slices.Sorted(maps.Keys(resultSet))
 }
 
 // suppressedTokens expands the suppress list: -1 becomes the default non-speech set,

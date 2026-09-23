@@ -3,6 +3,7 @@ package whisper
 import (
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -301,6 +302,35 @@ func TestSplitSegmentsByTimestamps(t *testing.T) {
 			t.Errorf("end: got %f, want 11.0", result.segments[0].end)
 		}
 	})
+}
+
+// TestSuppressedTokensConcurrent guards the shared-Model case (one Model per
+// card, one goroutine per CTranslate2 replica): run it with -race.
+func TestSuppressedTokensConcurrent(t *testing.T) {
+	for _, precomputed := range []bool{false, true} {
+		tok := makeTestTokenizer()
+		if precomputed {
+			tok.nonSpeechCache = tok.computeNonSpeechTokens()
+		}
+		want := tok.suppressedTokens([]int32{-1})
+
+		var wg sync.WaitGroup
+		results := make([][]int32, 8)
+		for i := range results {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				results[i] = tok.suppressedTokens([]int32{-1})
+			}(i)
+		}
+		wg.Wait()
+
+		for i, got := range results {
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("precomputed=%v goroutine %d: got %v, want %v", precomputed, i, got, want)
+			}
+		}
+	}
 }
 
 func TestSuppressedTokens(t *testing.T) {

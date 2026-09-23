@@ -170,42 +170,35 @@ ct2_model* ct2_model_load(
             dev_indices = {0};
         }
 
-        // Decide whether the encoder output must be moved to the host. Base this
-        // on distinct devices from the original list (before the inter_threads
-        // expansion below, which duplicates indices): several replicas on the
-        // same card share device memory, so keeping the output on the GPU is
-        // safe there; only crossing distinct devices requires the host round-trip.
+        // Decide whether the encoder output must be moved to the host: only when
+        // the model spans distinct devices. Several replicas on the same card
+        // share device memory, so keeping the output on the GPU is safe there.
         const ctranslate2::Device dev = parse_device(device);
         const std::set<int> distinct_devices(dev_indices.begin(), dev_indices.end());
         const bool encoder_to_cpu =
             dev == ctranslate2::Device::CUDA && distinct_devices.size() > 1;
 
-        // inter_threads > 1 means multiple replicas per device.
-        // CTranslate2 maps one replica per device_index entry,
-        // so we repeat each index to get the desired replica count.
-        if (inter_threads > 1) {
-            std::vector<int> expanded;
-            expanded.reserve(dev_indices.size() * inter_threads);
-            for (int idx : dev_indices) {
-                for (int r = 0; r < inter_threads; ++r) {
-                    expanded.push_back(idx);
-                }
-            }
-            dev_indices = std::move(expanded);
-        }
+        // inter_threads > 1 means multiple replicas per device. They are set via
+        // num_replicas_per_device rather than by repeating device indices:
+        // ModelLoader::load() pushes the same shared_ptr<const Model> for every
+        // replica on a device, so the weights are loaded once per card. A
+        // repeated index instead goes through Model::copy_to(), which always
+        // allocates a full copy of the weights, even on the same device. Each
+        // replica still gets its own worker thread.
+        ctranslate2::models::ModelLoader loader(path);
+        loader.device = dev;
+        loader.device_indices = dev_indices;
+        loader.num_replicas_per_device =
+            inter_threads > 1 ? static_cast<size_t>(inter_threads) : 1;
+        loader.compute_type = parse_compute_type(compute_type);
+        loader.tensor_parallel = false;
 
         ctranslate2::ReplicaPoolConfig pool_config;
         if (intra_threads > 0) pool_config.num_threads_per_replica = intra_threads;
 
         auto model = std::make_unique<ct2_model>();
         model->encoder_to_cpu = encoder_to_cpu;
-        model->whisper = std::make_unique<ctranslate2::models::Whisper>(
-            path,
-            dev,
-            parse_compute_type(compute_type),
-            dev_indices,
-            /*tensor_parallel=*/false,
-            pool_config);
+        model->whisper = std::make_unique<ctranslate2::models::Whisper>(loader, pool_config);
         return model.release();
     } catch (const std::exception& e) {
         set_error_out(error_out, e.what());
