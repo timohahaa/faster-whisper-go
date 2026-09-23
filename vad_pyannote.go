@@ -11,7 +11,12 @@ import (
 // speech-activity curve, hysteresis binarization (onset/offset) with min-cut
 // splitting of over-long regions, and speech-pad expansion.
 type pyannoteEngine struct {
-	vad *pyannotevad.VAD
+	vad      *pyannotevad.VAD
+	defaults VadConfig
+}
+
+func (e *pyannoteEngine) batchedDefaults() VadConfig {
+	return e.defaults
 }
 
 func (e *pyannoteEngine) speechChunks(samples []float32, cfg VadConfig) ([]SpeechChunk, error) {

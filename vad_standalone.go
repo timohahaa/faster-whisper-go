@@ -23,8 +23,8 @@ func NewVAD(backend string, cpuThreads int) (*VAD, error) {
 // BatchedSpeechChunks reproduces the VAD + windowing that TranscribeBatched runs
 // internally, returning window boundaries ready to be passed back as
 // TranscribeConfig.ClipTimestamps for the SAME samples slice. It builds the
-// batched VadConfig (MaxSpeechDurationS = chunkLength, MinSilenceDurationMs =
-// batchedMinSilenceMs) and merges the detected regions into windows of at most
+// batched VadConfig (the engine's batched defaults, MaxSpeechDurationS =
+// chunkLength) and merges the detected regions into windows of at most
 // chunkLength seconds via the shared mergeSpeechChunks helper.
 //
 // chunkLength == 0 uses the default 30s chunk length. The empty-result handling
@@ -41,13 +41,11 @@ func (v *VAD) BatchedSpeechChunks(samples []float32, chunkLength int) ([]SpeechC
 	// Same config the batched path builds before calling m.vad.speechChunks
 	// (see transcribe_batched.go). applyDefaults fills the rest; it is
 	// idempotent, so the engine calling it again internally is harmless.
-	vadCfg := &VadConfig{
-		MaxSpeechDurationS:   float64(chunkLength),
-		MinSilenceDurationMs: batchedMinSilenceMs,
-	}
+	vadCfg := v.engine.batchedDefaults()
+	vadCfg.MaxSpeechDurationS = float64(chunkLength)
 	vadCfg.applyDefaults()
 
-	chunks, err := v.engine.speechChunks(samples, *vadCfg)
+	chunks, err := v.engine.speechChunks(samples, vadCfg)
 	if err != nil {
 		return nil, err
 	}

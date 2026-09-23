@@ -71,6 +71,40 @@ func (c *VadConfig) applyDefaults() {
 	}
 }
 
+// withDefaults returns c with its zero fields taken from defaults.
+func (c VadConfig) withDefaults(defaults VadConfig) VadConfig {
+	// NegThreshold follows Threshold: an explicit Threshold keeps the
+	// Threshold-0.15 offset from applyDefaults.
+	if c.Threshold == 0 {
+		c.Threshold = defaults.Threshold
+		if c.NegThreshold == 0 {
+			c.NegThreshold = defaults.NegThreshold
+		}
+	}
+	if c.MinSpeechDurationMs == 0 {
+		c.MinSpeechDurationMs = defaults.MinSpeechDurationMs
+	}
+	if c.MaxSpeechDurationS == 0 {
+		c.MaxSpeechDurationS = defaults.MaxSpeechDurationS
+	}
+	if c.MinSilenceDurationMs == 0 {
+		c.MinSilenceDurationMs = defaults.MinSilenceDurationMs
+	}
+	if c.SpeechPadMs == 0 {
+		c.SpeechPadMs = defaults.SpeechPadMs
+	}
+	if c.MinSilenceAtMaxSpeech == 0 {
+		c.MinSilenceAtMaxSpeech = defaults.MinSilenceAtMaxSpeech
+	}
+	if c.Onset == 0 {
+		c.Onset = defaults.Onset
+	}
+	if c.Offset == 0 {
+		c.Offset = defaults.Offset
+	}
+	return c
+}
+
 const vadWindowSize = 512 // samples per VAD frame (Silero window size)
 
 // SpeechChunk represents a contiguous region of speech in sample indices.

@@ -12,9 +12,8 @@ import (
 )
 
 const (
-	defaultBatchSize    = 8
-	defaultMelWorkers   = 4
-	batchedMinSilenceMs = 160
+	defaultBatchSize  = 8
+	defaultMelWorkers = 4
 )
 
 // chunkSegments holds the per-chunk decoding output during batched post-processing.
@@ -82,19 +81,17 @@ func (m *Model) inferBatched(ctx context.Context, samples []float32, cfg Transcr
 		}
 		speechChunks = cfg.ClipTimestamps
 	} else {
-		vadCfg := cfg.VadConfig
-		if vadCfg == nil {
-			vadCfg = &VadConfig{}
+		var vadCfg VadConfig
+		if cfg.VadConfig != nil {
+			vadCfg = *cfg.VadConfig
 		}
+		vadCfg = vadCfg.withDefaults(m.vad.batchedDefaults())
 		vadCfg.MaxSpeechDurationS = float64(chunkLength)
-		if vadCfg.MinSilenceDurationMs == 0 {
-			vadCfg.MinSilenceDurationMs = batchedMinSilenceMs
-		}
 		vadCfg.applyDefaults()
 
 		var err error
 		vadStart := time.Now()
-		speechChunks, err = m.vad.speechChunks(samples, *vadCfg)
+		speechChunks, err = m.vad.speechChunks(samples, vadCfg)
 		tim.VAD = time.Since(vadStart)
 		if err != nil {
 			return nil, err

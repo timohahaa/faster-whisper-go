@@ -21,16 +21,35 @@ const (
 // into speech regions. Implementations are held one-per-model.
 type vadEngine interface {
 	speechChunks(samples []float32, cfg VadConfig) ([]SpeechChunk, error)
+	batchedDefaults() VadConfig
 	Close()
 }
 
+// Batched-path VAD defaults per backend.
+var (
+	sileroBatchedDefaults = VadConfig{
+		Threshold:            0.20,
+		NegThreshold:         0.10,
+		MinSilenceDurationMs: 500,
+		SpeechPadMs:          800,
+	}
+	pyannoteBatchedDefaults = VadConfig{
+		MinSilenceDurationMs: 160,
+	}
+)
+
 // sileroEngine is the vadEngine backed by the Silero VAD.
 type sileroEngine struct {
-	vad *silerovad.VAD
+	vad      *silerovad.VAD
+	defaults VadConfig
 }
 
 func (e *sileroEngine) speechChunks(samples []float32, cfg VadConfig) ([]SpeechChunk, error) {
 	return GetSpeechTimestamps(e.vad, samples, cfg)
+}
+
+func (e *sileroEngine) batchedDefaults() VadConfig {
+	return e.defaults
 }
 
 func (e *sileroEngine) Close() {
@@ -141,13 +160,13 @@ func newVadEngine(backend string, vadCPUThreads int) (vadEngine, error) {
 		if err != nil {
 			return nil, fmt.Errorf("init pyannote vad: %w", err)
 		}
-		return &pyannoteEngine{vad: vad}, nil
+		return &pyannoteEngine{vad: vad, defaults: pyannoteBatchedDefaults}, nil
 	case "", VadBackendSilero:
 		vad, err := silerovad.New()
 		if err != nil {
 			return nil, fmt.Errorf("init silero vad: %w", err)
 		}
-		return &sileroEngine{vad: vad}, nil
+		return &sileroEngine{vad: vad, defaults: sileroBatchedDefaults}, nil
 	default:
 		return nil, fmt.Errorf("unknown VAD backend %q", backend)
 	}
