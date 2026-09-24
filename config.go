@@ -114,9 +114,13 @@ type TranscribeConfig struct {
 	// nil means disabled. Only effective when WordTimestamps is true.
 	HallucinationSilenceThreshold *float32
 
-	// FilterHallucinationPhrases drops segments whose full text exactly matches
-	// (case-insensitively) a known per-language hallucination phrase from the
-	// embedded blocklist. Disabled by default.
+	// FilterHallucinationPhrases removes known per-language hallucination
+	// phrases from the embedded blocklist, ignoring case and punctuation.
+	// Phrases of three or more words are removed anywhere in a segment; two-word
+	// ones when repeated back to back or set apart from the surrounding text
+	// (own sentence, capitalized mid-sentence, followed by a new sentence);
+	// one-word ones only when they are the whole segment. Segments left empty
+	// are dropped. Disabled by default.
 	FilterHallucinationPhrases bool
 
 	// PrependPunctuations lists punctuation symbols that should be merged with

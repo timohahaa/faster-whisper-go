@@ -220,7 +220,7 @@ _ = events
 | `BatchSize`                  | 8                   | Batched mode only                  |
 | `InitialPrompt`              | ""                  | Context for first window           |
 | `Hotwords`                   | ""                  | Hint phrases                       |
-| `FilterHallucinationPhrases` | false               | Drop known hallucination segments  |
+| `FilterHallucinationPhrases` | false               | Remove known hallucination phrases |
 
 See `config.go` for the full list.
 
